@@ -9,7 +9,7 @@ rho <- 0.9
 p <- 100
 sigma <- rho^as.matrix(dist(1:p))
 mu <- rep(0, p) #
-mu <- predict(smooth.spline(rnorm(p, sd = 2), df = p/5))$y
+mu <- predict(smooth.spline(rnorm(p, sd = 4), df = p/5))$y
 y <- as.numeric(mvtnorm::rmvnorm(1, mean = mu, sigma = sigma))
 plot(y, type = "l", col = "red", ylim = c(min(c(y, mu)), max(c(y, mu))))
 lines(mu, col = "black")
@@ -67,24 +67,27 @@ system.time(newmle <- roiMLE(y, sigma, threshold,
                  selected = select,
                  stepSizeCoef = 0.15, stepRate = 0.65,
                  delay = 100, maxiter = 4010,
-                 trimSample = 50,
+                 sampPerIter = 50,
+                 tykohonovSlack = 1,
                  assumeConvergence = 4000,
-                 probMethod = "all",
                  imputeBoundary = "neighbors"))
 lines(keep, newmle$conditional, col = "dark green")
 
 system.time(oldmle <- optimizeSelected(y, sigma, threshold,
                            coordinates = matrix(1:length(y), ncol = 1),
                            selected = select,
-                           stepSizeCoef = 0.25, stepRate = 0.65,
-                           delay = 100, maxiter = 2000,
-                           assumeConvergence = 1950,
+                           stepSizeCoef = 0.15, stepRate = 0.65,
+                           delay = 100, maxiter = 2050,
+                           assumeConvergence = 2000,
+                           tykohonovSlack = 1,
                            probMethod = "all",
                            imputeBoundary = "neighbors"))
 lines(keep, oldmle$conditional, col = "blue")
-mean((mu[select] - oldmle$conditional[select])^2)
-mean((mu[select] - newmle$conditional[select])^2)
+sqrt(mean((mu[select] - oldmle$conditional[select])^2))
+sqrt(mean((mu[select] - newmle$conditional[select])^2))
 
+mean(oldmle$conditional[select]) - mean(mu[select])
+mean(newmle$conditional[select]) - mean(mu[select])
 
 
 

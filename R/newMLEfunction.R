@@ -50,12 +50,12 @@ computeTykohonov <- function(selected, coordinates) {
                                     dims = c(nrow(firstDiff), sum(selected)))
   secondDiff <- secondDiff[secondDiff[, 2] != 0, ]
   if(length(secondDiff) == 0) {
-    secondDiff <- Matrix::sparseMatrix(i = p, j = p, x = 0)
+    secondDiff <- sparseMatrix(i = p, j = p, x = 0)
   } else {
     if(max(secondDiff[, 1]) < p | max(secondDiff[, 2] < p)) {
       secondDiff <- rbind(secondDiff, c(p, p, 0))
     }
-    secondDiff <- Matrix::sparseMatrix(i = secondDiff[, 1], j = secondDiff[, 2], x = secondDiff[, 3])
+    secondDiff <- sparseMatrix(i = secondDiff[, 1], j = secondDiff[, 2], x = secondDiff[, 3])
   }
   return(list(firstDiff = firstDiff, secondDiff = secondDiff))
 }
@@ -99,50 +99,90 @@ adjustTykohonov <- function(obsDiff, obsmean, mu, selected,
   return(tykohonovParam)
 }
 
-# y = vector of observations
-# cov = covariance estimate
-# threshold = a single threshold for all observations, selection event is y > threshold | y < threshold.
-# projected = Should the mean be constrained to a value, if projected is a scalar then
-#             the mle is estimated constrained to \bar{mu} == projected.
-# quadraticSlack = For projected gradient, the mean vector is constrained to a ball.
-#                  This determines the size of the ball.
-# barrierCoef = For non-constrained MLE the MLE is estimated with a barrier function preventing
-#               the coordinates of mu from changing signs, this coefficient is related to the barrier function.
-# stepSizeCoef = Scaling for stochastic gradient.
-# stepRate = Stochastic gradient is scaled by iteration^{-stepRate}
-# trimSample = How many Gibbs cycles to go through between samples.
-# lambdaStart = For projected gradient method, what should the initial value for lambda
-#               be. Should be set to a high value if mean is constrained to a small ball.
-# maxiter = Number of stochastic gradient steps. 1000 is usually more than enough. For some projected
-#           problems a large number of steps is required to properly tune lambda.
-
-# Outputs:
-# sample - a matrix of samples
-# estimates - the optimization path
-# conditional - the conditional estimate
-# coordinateCI - confidence intervals for the coordinates
-# meanCI - CI for the mean
+#' Compute the MLE for a selected region of interest
+#'
+#' Computes the conditionla mle for a region selected based on
+#' the selection rule \code{y[selected] > threshold} or
+#' \code{y[selected] < -threshold}, and the coordinates which were not
+#' selected must violate the selection rule.
+#'
+#' @param y the observed noraml coordinates
+#'
+#' @param cov the covariance of \code{y}
+#'
+#' @param threshold the threshold used in the selection rule.
+#' Must be either a scalar or a numeric vector of size \code{length(y)}
+#'
+#' @param coordinates an optional matrix of the coordinates of the observed
+#' vector. This is only relevant if \code{y} corresponds to a spatial
+#' or temporal observation
+#'
+#' @param selected an optional boolean vector, with \code{TRUE} coordinates
+#' corresponding to coordinates of \code{y} that were selected.
+#'
+#' @param projected an optional fixed value that \code{mean(mu)} must equal.
+#' Can be used to construct profile likelihood post-selection confidence
+#' intervals.
+#'
+#' @param tykohonovParam an optional penalty value for the tykohonov
+#' regularizer. This is an (inferior) altenative to specifying a
+#' \code{tykohonovSlack}.
+#'
+#' @param tykohonovSlack the estimation routine uses first differences
+#' Tykohonov regularization to estimate the mean of the selected region.
+#' \code{tykohonovSlack} speficies the allowed deviation from the observed
+#' first order differences. The description for details
+#'
+#' @param stepSizeCoef step size coefficients for stochastic gradient step.
+#' Best left unchanged.
+#'
+#' @param stepRate the rate at which the stochastic gradient steps size should
+#' decrease as a function of the number of steps already taken.
+#'
+#' @param sampPerIter the number of slice MH samples to take for computing the
+#' stochastic gradient estimate in each stochastic gradient step
+#'
+#' @param delay the number of iterations to wait before starting to decrease
+#' the stochastic gradient step size
+#'
+#' @param maxiter the number of stochastic gradient steps to take
+#'
+#' @param assumeConvergence after how many gradient steps should we assume
+#' convergence? The final MLE estimate will be the average of the last
+#' \code{maxiter - assumeConvergence} estimates
+#'
+#' @param nsamp the number of samples to take from the estimated
+#' post-selection distribution
+#'
+#' @param init initial value for the mean estimate
+#'
+#' @param imputeBoundary the boundary imputation method to use. See
+#' description for details
+#'
+#'
+#' @import Matrix
 #' @export
 roiMLE <- function(y, cov, threshold,
-                             coordinates = NULL,
-                             selected = NULL,
-                             projected = NULL,
-                             tykohonovParam = NULL,
-                             tykohonovSlack = 1,
-                             barrierCoef = 0.1,
-                             stepSizeCoef = 0.25,
-                             stepRate = 0.65,
-                             trimSample = 40,
-                             delay = 100,
-                             maxiter = 4000,
-                             assumeConvergence = 2000,
-                             CIalpha = 0.05,
-                             init = NULL,
-                             probMethod = c("all", "selected", "onesided"),
-                             imputeBoundary = c("none", "mean", "neighbors")) {
+                   coordinates = NULL,
+                   selected = NULL,
+                   projected = NULL,
+                   tykohonovParam = NULL,
+                   tykohonovSlack = 1,
+                   stepSizeCoef = 0.15,
+                   stepRate = 0.65,
+                   sampPerIter = 40,
+                   delay = 100,
+                   maxiter = 2000,
+                   assumeConvergence = 1500,
+                   nsamp = 0,
+                   init = NULL,
+                   imputeBoundary = c("neighbors", "none", "mean")) {
   maxiter <- max(maxiter, assumeConvergence + length(y) + 1)
   # Basic checks and preliminaries ---------
-  if(length(probMethod) > 1) probMethod <- probMethod[1]
+  if(!(length(threshold) %in% c(1, length(y)))) {
+    stop("threshold must be either: a scalar, or a numeric vector of size
+         length(y).")
+  }
 
   if(is.null(selected)){
     selected <- abs(y) > threshold
@@ -161,7 +201,7 @@ roiMLE <- function(y, cov, threshold,
       unselected <- which(!selected)
       distances <- as.matrix(dist(coordinates))
       diag(distances) <- Inf
-      neighbors <- cbind(unselected, apply(distances[unselected, ], 1, function(x) which(selected)[which.min(x[selected])[1]]))
+      neighbors <- cbind(unselected, apply(distances[unselected, , drop = FALSE], 1, function(x) which(selected)[which.min(x[selected])[1]]))
     }
   }
 
@@ -196,7 +236,6 @@ roiMLE <- function(y, cov, threshold,
     mu <- y
     mu[!selected] <- 0
   }
-  threshold <- threshold
 
   sds <- sqrt(diag(cov))
   vars <- sds^2
@@ -218,12 +257,7 @@ roiMLE <- function(y, cov, threshold,
   }
 
   estimates <- matrix(nrow = maxiter, ncol = p)
-  sampleMat <- matrix(nrow = maxiter - 1, ncol = length(y))
-  #gradSamp <- matrix(nrow = maxiter - 1, ncol = sum(selected))
   estimates[1, ] <- mu
-  # initial values for positive/negative Gibbs samplers
-  posSamp <- abs(y)
-  negSamp <- -abs(y)
 
   # Initializing Tykohonov Penalization Parameters
   if(any(tykohonovParam > 0)) {
@@ -233,7 +267,6 @@ roiMLE <- function(y, cov, threshold,
     obsDiff[2] <- as.numeric(crossprod(yselected, crossprod(secondDiff, yselected)))
   }
 
-  restarts <- 0
   if(!is.null(projected)) {
     slackAdjusted <- FALSE
   } else {
@@ -255,24 +288,23 @@ roiMLE <- function(y, cov, threshold,
   uth <- b
   lth[!selected] <- -lth[!selected]
   uth[!selected] <- -uth[!selected]
+  sampMat <- matrix(0.0, nrow = sampPerIter, ncol = length(y))
   #############################
 
   for(i in 2:maxiter) {
-    if(i - 1 > nrow(sampleMat)) {
-      maxiter <- maxiter - 1
-      break # Fix for odd bug
-    }
-
     # SLICE SAMPLING!
     sampInit <- currentSamp
     sampInit[!selected] <- -sampInit[!selected]
     sampmu <- mu
     sampmu[!selected] <- -sampmu[!selected]
-    samp <- sliceRcppInner(trimSample, sampInit, mu, chol, lth, uth)
-    samp[, !selected] <- -samp[, !selected]
-    currentSamp <- samp[nrow(samp), ]
-    sampleMat[i - 1, ] <- currentSamp
-    samp <- colMeans(samp)
+    sampInit <- sampInit - sampmu
+
+    sliceSamplerRcpp(sampMat = sampMat, samp = sampInit,
+                     chol = chol,
+                     lth = lth - sampmu, uth = uth - sampmu)
+    sampMat <- t(t(sampMat) + sampmu)
+    sampMat[, !selected] <- -sampMat[, !selected]
+    samp <- colMeans(sampMat)
 
     # Computing gradient ---------------
     if(i == assumeConvergence) {
@@ -339,29 +371,31 @@ roiMLE <- function(y, cov, threshold,
                                         tykohonovSlack, tykohonovParam)
     }
     estimates[i, ] <- mu
-
-    # progress...
-    # if((i %% 100) == 0) {
-    #   cat(i, " ")
-    #   cat(i, " ", round(mean(mu[selected]), 3), " ")
-    #   print(c(tyk = tykohonovParam))
-    #   print(mu[selected])
-    # }
   }
   #cat("\n")
 
-  if(restarts > 0) {
-    warning(paste("Chain restarted", restarts, "times!"))
+  # Sampling from estimated mean --------
+  sampmu <- colMeans(estimates[assumeConvergence:maxiter, ])
+  if(nsamp > 0) {
+    initsamp <- y
+    initsamp[!selected] <- -initsamp[!selected]
+    sampmu[!selected] <- -sampmu[!selected]
+    outSamples <- sliceRcppInner(nsamp, initsamp, sampmu, chol, lth, uth)
+    outSamples[, !selected] <- -outSamples[, !selected]
+  } else {
+    outSamples <- NULL
   }
 
   # Unnormalizing estimates and samples --------------------------
-  for(i in 1:ncol(sampleMat)) {
-    sampleMat[, i] <- sampleMat[, i] * sqrt(vars[i])
+  for(i in 1:length(y)) {
+    if(nsamp > 0) {
+      outSamples[, i] <- outSamples[, i] * sqrt(vars[i])
+    }
     estimates[, i] <- estimates[, i] * sqrt(vars[i])
   }
-  conditional <- colMeans(estimates[floor(maxiter * 0.8):maxiter, ])
 
-  return(list(sample = sampleMat,
+  conditional <- colMeans(estimates[assumeConvergence:maxiter, ])
+  return(list(sample = outSamples,
               estimates = estimates,
               conditional = conditional))
 }

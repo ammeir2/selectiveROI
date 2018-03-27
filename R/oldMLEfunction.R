@@ -60,7 +60,7 @@ optimizeSelected <- function(y, cov, threshold,
       unselected <- which(!selected)
       distances <- as.matrix(dist(coordinates))
       diag(distances) <- Inf
-      neighbors <- cbind(unselected, apply(distances[unselected, ], 1, function(x) which(selected)[which.min(x[selected])[1]]))
+      neighbors <- cbind(unselected, apply(distances[unselected, , drop = FALSE], 1, function(x) which(selected)[which.min(x[selected])[1]]))
     }
   }
 
