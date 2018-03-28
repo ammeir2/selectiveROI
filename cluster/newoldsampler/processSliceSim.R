@@ -1,4 +1,4 @@
-filenames <- as.list(dir(path = 'cluster/newoldsampler/results/', pattern="sliceComparison_*")) # W Dependence
+filenames <- as.list(dir(path = 'cluster/newoldsampler/results/', pattern="sliceComparison_C_*")) # W Dependence
 filenames <- lapply(filenames, function(x) paste0('cluster/newoldsampler/results/', x))
 filenames <- as.character(filenames)
 results <- vector(length(filenames), mode = "list")
@@ -19,11 +19,12 @@ computeRuntime <- function(x) {
 runtime <- sapply(results, computeRuntime) %>% t()
 runtime <- data.frame(runtime)
 
-runtime <- group_by(runtime, size) %>%
-  summarize(gibbs = median(gibbs), slice = median(slice))
-runtime <- melt(runtime, id = c("size"))
-names(runtime)[2:3] <- c("method", "time")
-ggplot(runtime) + geom_smooth(aes(x = size, y = time, col = method)) +
+# runtime <- group_by(runtime, size) %>%
+#   summarize(gibbs = median(gibbs), slice = median(slice))
+runtime <- melt(runtime, id = c("size", "rho"))
+names(runtime)[3:4] <- c("method", "time")
+ggplot(runtime) +
+  geom_smooth(aes(x = size, y = time, col = method), method = "loess") +
   theme_bw() +
   ylab("time in secs") +
   xlab("cluster size")

@@ -1,2 +1,5 @@
 ^.*\.Rproj$
 ^\.Rproj\.user$
+figures/*
+cluster/*
+misc scripts/*
