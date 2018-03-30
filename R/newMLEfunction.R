@@ -93,7 +93,7 @@ adjustTykohonov <- function(obsDiff, obsmean, mu, selected,
     } else if(ratio < 1) {
       tykohonovParam[i] * 0.95
     }
-    tykohonovParam[i] <- min(max(tykohonovParam[i], 10^-6), 10^5)
+    tykohonovParam[i] <- min(max(tykohonovParam[i], 10^-6), 10^8)
   }
 
   return(tykohonovParam)
@@ -182,6 +182,10 @@ roiMLE <- function(y, cov, threshold,
   if(!(length(threshold) %in% c(1, length(y)))) {
     stop("threshold must be either: a scalar, or a numeric vector of size
          length(y).")
+  }
+
+  if(length(threshold) == 1) {
+    threshold <- rep(threshold, length(y))
   }
 
   if(is.null(selected)){
@@ -377,6 +381,7 @@ roiMLE <- function(y, cov, threshold,
   # Sampling from estimated mean --------
   sampmu <- colMeans(estimates[assumeConvergence:maxiter, ])
   if(nsamp > 0) {
+    # browser()
     initsamp <- y
     initsamp[!selected] <- -initsamp[!selected]
     sampmu[!selected] <- -sampmu[!selected]

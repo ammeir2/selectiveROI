@@ -1,4 +1,10 @@
-run.sim <- function(config, noise_type ="sim", noise_dat = NULL) {
+library(selectiveROI)
+args <- commandArgs(TRUE)
+eval(parse(text=args[[1]]))
+seed <- as.numeric(seed)
+
+run.sim <- function(config, noise_type ="sim", noise_dat = NULL,
+                    burnin = 2000, sampSize = 14000, keepeach = 6) {
   snr <- config[["snr"]]
   spread <- config[["spread"]]
   BHlevel <- config[["BHlevel"]]
@@ -49,10 +55,10 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL) {
       if(sum(selected) >= 2) {
         threshold <- abs(qnorm(BHlevel / 2))
         coordinates$selected <- coordinates$zval > threshold
-        pclusters <- findClusters(coordinates)
+        pclusters <- findClusters(coordinates, metric = "manhattan", distThreshold = 2)
 
         coordinates$selected <- coordinates$zval < -threshold
-        nclusters <- findClusters(coordinates)
+        nclusters <- findClusters(coordinates, metric = "manhattan", distThreshold = 2)
         clusters <- c(pclusters, nclusters)
         coordinates$selected <- coordinates$qval < BHlevel
 
@@ -85,19 +91,19 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL) {
       signal <- coordinates$signal[cluster$row]
       subCov <- covariance[cluster$row, cluster$row, drop = FALSE]
 
-      print(c(round(m / length(clusters), 2), nrow(cluster)))
+      # print(c(round(m / length(clusters), 2), nrow(cluster)))
 
-      try(mle <- roiMLE(observed, subCov, threshold[cluster$row],
+      try(mle <- roiMLE(observed, subCov, threshold,
                         selected = selected,
                         projected = NULL,
-                        stepRate = 0.6, stepSizeCoef = 2,
+                        stepRate = 0.6, stepSizeCoef = .25,
                         coordinates = cluster[, 1:3],
                         tykohonovSlack = slack,
-                        delay = 10,
+                        delay = 100,
                         assumeConvergence = 1500,
                         sampPerIter = 100,
                         maxiter = 2000,
-                        nsamp = 500,
+                        nsamp = 0,
                         imputeBoundary = "neighbors"))
 
       w <- rep(1, sum(selected))
@@ -117,7 +123,7 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL) {
 
         # Computing the p-value based on samples from the null
         nullfit <- NULL
-        try(nullfit <- roiMLE(observed, subCov, threshold[cluster$row],
+        try(nullfit <- roiMLE(observed, subCov, threshold,
                                         projected = 0,
                                         selected = selected,
                                         coordinates = cluster[, 1:3],
@@ -126,12 +132,14 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL) {
                                         delay = 1,
                                         assumeConvergence = 1,
                                         maxiter = 2,
-                                        nsamp = 5000,
+                                        nsamp = sampSize,
                                         init = rep(0, length(observed)),
                                         imputeBoundary = "neighbors"))
         if(is.null(nullfit)) next
         naive <- mean(observed[selected])
-        samp <- nullfit$sample
+        sampIndex <- seq(from = burnin, to = sampSize, by = keepeach)
+        sampIndex <- sampIndex[sampIndex <= sampSize]
+        samp <- nullfit$sample[sampIndex, ]
         nullmeans <- NULL
         try(nullmeans <- as.numeric(samp[, selected, drop = FALSE] %*% w))
         if(is.null(nullmeans)) next
@@ -144,20 +152,21 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL) {
 
         # Projecting to the truth, rejecting the test here implies
         # that the CI doesn't cover the truth.
-        try(profile <- roiMLE(observed, subCov, threshold[cluster$row],
+        profSlack <- mean(signal[selected]^2) / mean(observed[selected])^2 + 10^-8
+        try(profile <- roiMLE(observed, subCov, threshold,
                           selected = selected,
                           projected = weighted.mean(signal[selected], w),
                           stepRate = 0.65, stepSizeCoef = 0.25,
                           coordinates = cluster[, 1:3],
-                          tykohonovSlack = slack,
-                          delay = 50,
-                          assumeConvergence = 750,
+                          tykohonovSlack = profSlack,
+                          delay = 100,
+                          assumeConvergence = 1000,
                           sampPerIter = 100,
-                          maxiter = 1500,
-                          nsamp = 5000,
+                          maxiter = 2000,
+                          nsamp = sampSize,
                           imputeBoundary = "neighbors"))
 
-        samp <- profile$sample
+        samp <- profile$sample[sampIndex, ]
         profMeans <- NULL
         try(profMeans <- as.numeric(samp[, selected, drop = FALSE] %*% w))
         if(is.null(profMeans)) next
@@ -172,7 +181,7 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL) {
         results[[slot]][[2]] <- profResult
         results[[slot]][[3]] <- c(conditional = conditional, naive = naive, true = true)
 
-        print(profResult)
+        # print(profResult)
         print(mse)
 
         weight <- 1
@@ -192,7 +201,7 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL) {
 
     simcover[rep, 1] <- sum(iterCover) / sum(weights)
     simcover[rep, 2] <- sum(iterPower) / sum(weights)
-    print(c(cover = iterCover, power = iterPower) / weights)
+    # print(c(cover = iterCover, power = iterPower) / weights)
     print(colMeans(simcover[1:rep, , drop = FALSE]))
     simresults[[rep]] <- results
   }
@@ -200,13 +209,13 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL) {
   return(simresults)
 }
 
-configurations <- expand.grid(snr = c(4, 2, 1, 0),
-                              spread = c(2),
+configurations <- expand.grid(snr = c(5:0),
+                              spread = c(1, 2),
                               rho = c(0.45, 0.9),
-                              BHlevel = c(0.001, 0.01),
-                              replications = 10,
+                              BHlevel = c(0.01, 0.001),
+                              replications = 2,
                               slack = 1)
-
-simResults <- apply(configurations, 1, run.sim, noise_type ="sim")
-filename <- paste("results/cubeROI_A", seed, ".rds", sep = "")
+set.seed(seed)
+simResults <- apply(configurations, 1, run.sim, noise_type = "sim")
+filename <- paste("results/cubeROI_B_", seed, ".rds", sep = "")
 saveRDS(simResults, file = filename)

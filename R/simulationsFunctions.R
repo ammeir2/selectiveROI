@@ -1,9 +1,9 @@
 #' @export
-findClusters <- function(coordinates) {
+findClusters <- function(coordinates, metric = "manhattan", distThreshold = 2) {
   columns <- which(names(coordinates) %in% c("i", "j", "k"))
   selected <- coordinates[coordinates$selected, ]
   graph <- as.matrix(dist(coordinates[, columns], method = "manhattan"))
-  graph[graph > 2] <- 0
+  graph[graph > distThreshold] <- 0
   clusterNumber <- 1
   clusters <- list()
   while(nrow(selected) > 0) {
