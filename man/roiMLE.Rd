@@ -8,7 +8,8 @@ roiMLE(y, cov, threshold, coordinates = NULL, selected = NULL,
   projected = NULL, tykohonovParam = NULL, tykohonovSlack = 1,
   stepSizeCoef = 0.15, stepRate = 0.65, sampPerIter = 40, delay = 100,
   maxiter = 2000, assumeConvergence = 1500, nsamp = 0, init = NULL,
-  imputeBoundary = c("neighbors", "none", "mean"))
+  progress = FALSE, imputeBoundary = c("smooth", "neighbors", "none",
+  "mean"))
 }
 \arguments{
 \item{y}{the observed noraml coordinates}
@@ -65,7 +66,7 @@ post-selection distribution}
 description for details}
 }
 \description{
-Computes the conditionla mle for a region selected based on
+Computes the conditional mle for a region selected based on
 the selection rule \code{y[selected] > threshold} or
 \code{y[selected] < -threshold}, and the coordinates which were not
 selected must violate the selection rule.

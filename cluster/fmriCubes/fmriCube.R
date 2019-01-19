@@ -1,20 +1,17 @@
 library(selectiveROI)
-args <- commandArgs(TRUE)
-eval(parse(text=args[[1]]))
-seed <- as.numeric(seed)
+# args <- commandArgs(TRUE)
+# eval(parse(text=args[[1]]))
+# seed <- as.numeric(seed)
 
-run.sim <- function(config, noise_type ="sim", noise_dat = NULL,
-                    burnin = 10^4, sampSize = 10^5 + 10^4, keepeach = 100) {
+run.sim <- function(config, noise_dat = NULL,
+                    burnin = 10^4, sampSize = 10^5/2 + 10^4,
+                    keepeach = 50) {
   snr <- config[["snr"]]
   spread <- config[["spread"]]
   BHlevel <- config[["BHlevel"]]
   replications <- config[["replications"]]
   slack <- config[["slack"]]
-
-  if(noise_type == "sim" ) {
-    rho <- config[["rho"]]
-    grp_size <- -1
-  }
+  grp_size <- config[["grp_size"]]
 
   I <- 11
   J <- 11
@@ -23,12 +20,19 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL,
 
   coordinates <- expand.grid(i = 1:I, j = 1:J, k = 1:K)
 
-  if (noise_type == "sim") {
-    covariance <- rho^as.matrix(dist(coordinates[, 1:3], method = "euclidean",
-                                     diag = TRUE, upper = TRUE))
-    covEigen <- eigen(covariance)
-    sqrtCov <- covEigen$vectors %*% diag(sqrt(covEigen$values)) %*% t(covEigen$vectors)
-  }
+  # Something with fMRI covariance ---
+  stopifnot(all.equal(dim(noise_dat)[1:3], dims))
+  pop_size <- dim(noise_dat)[4]
+  dim(noise_dat) = c(prod(dims), pop_size)
+  alpha <- 1/pop_size
+  sample_sds <- apply(noise_dat, 1, sd)
+  # covariance of a single sample
+  sample_covariance <- (1-alpha)*cov(t(noise_dat))+alpha*diag(sample_sds^2)
+  # covariance of group averages
+  covariance <- sample_covariance*(1/grp_size*2)
+  dim(noise_dat) <- c(dims[1:3],pop_size)
+  rm(sample_covariance)
+  #######################################
 
   simresults <- list()
   simcover <- matrix(nrow = replications, ncol = 2)
@@ -39,10 +43,8 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL,
     maxsize <- 0
     covariance <- origCov
     while(is.na(maxsize) | maxsize < 2) {
-      if (noise_type == "sim") {
-        coordinates <- generateArrayData3D(dims, sqrtCov, snr, spread)
-        sds <- 1
-      }
+      coordinates <- residualData3D(noise_dat, grp_size, snr, spread)
+      sds <- sqrt(diag(covariance)) / coordinates$scale_coef
 
       coordinates$observed <- coordinates$observed / sds
       coordinates$signal <- coordinates$signal / sds
@@ -72,7 +74,7 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL,
 
     #covariance <- cov2cor(covariance)
 
-    print(c(rep = rep, rho = rho, grp_size = grp_size, BHlevel = BHlevel, snr = snr, spread = spread))
+    print(c(rep = rep, grp_size = grp_size, BHlevel = BHlevel, snr = snr, spread = spread))
     print(c(nselected = sum(selected)))
     sizes <- sapply(clusters, nrow)
 
@@ -92,10 +94,10 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL,
       subCov <- covariance[cluster$row, cluster$row, drop = FALSE]
       # print(c(round(m / length(clusters), 2), nrow(cluster)))
 
-      try(mle <- roiMLE(observed, subCov, threshold,
+      try(mle <- roiMLE(observed, subCov, threshold[cluster$row],
                         selected = selected,
                         projected = NULL,
-                        stepRate = 0.6, stepSizeCoef = 2,
+                        stepRate = 0.6, stepSizeCoef = 1,
                         coordinates = cluster[, 1:3],
                         tykohonovSlack = slack,
                         delay = 100,
@@ -122,7 +124,7 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL,
 
         # Computing the p-value based on samples from the null
         nullfit <- NULL
-        try(nullfit <- roiMLE(observed, subCov, threshold,
+        try(nullfit <- roiMLE(observed, subCov, threshold[cluster$row],
                                         projected = 0,
                                         selected = selected,
                                         coordinates = cluster[, 1:3],
@@ -152,10 +154,10 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL,
         # Projecting to the truth, rejecting the test here implies
         # that the CI doesn't cover the truth.
         profSlack <- slack * abs(mean(signal[selected]) / mean(observed[selected])) + 10^-8
-        try(profile <- roiMLE(observed, subCov, threshold,
+        try(profile <- roiMLE(observed, subCov, threshold[cluster$row],
                           selected = selected,
                           projected = weighted.mean(signal[selected], w),
-                          stepRate = 0.65, stepSizeCoef = 2,
+                          stepRate = 0.65, stepSizeCoef = 1,
                           coordinates = cluster[, 1:3],
                           tykohonovSlack = profSlack,
                           delay = 100,
@@ -175,7 +177,7 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL,
         true <- weighted.mean(signal[selected], w)
         profResult <- c(true = mean(signal[selected]), profPval = profPval, pvalue = pvalue)
         results[[slot]][[1]] <- c(snr = snr, spread = spread, method = methodind,
-                                  rho = rho, BHlevel = BHlevel, grp_size = grp_size,
+                                  BHlevel = BHlevel, grp_size = grp_size,
                                   size = sum(selected), true = true, slack = slack)
         results[[slot]][[2]] <- profResult
         results[[slot]][[3]] <- c(conditional = conditional, naive = naive, true = true)
@@ -212,15 +214,15 @@ run.sim <- function(config, noise_type ="sim", noise_dat = NULL,
   return(simresults)
 }
 
-configurations <- expand.grid(spread = c(2),
-                              rho = c(0.9, 0.45),
-                              snr = c(5:0),
+configurations <- expand.grid(snr = c(0:5),
+                              spread = c(2),
+                              grp_size = c(8, 16),
                               BHlevel = c(0.01, 0.001),
-                              replications = 1,
-                              slack = c(1.2))
+                              replications = 2,
+                              slack = 2)
 set.seed(seed)
-configurations <- configurations[sample.int(nrow(configurations), 24, replace = FALSE), ]
-simResults <- apply(configurations, 1, run.sim, noise_type = "sim")
-filename <- paste("results/cubeROI_P_rhoNorm_", seed, ".rds", sep = "")
-# filename <- paste("results/flatROI_A_rhoNorm_", seed, ".rds", sep = "")
+load('fmridata/brain_data_4mm_Cambridge.rda')
+dat <- brain_data$t_cube[1:11,1:11,1:9,]
+simResults <- apply(configurations, 1, run.sim, noise_dat = dat)
+filename <- paste("results/cubeROI_L_rhosMan1_", seed, ".rds", sep = "")
 saveRDS(simResults, file = filename)

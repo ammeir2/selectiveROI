@@ -8,3 +8,5 @@ src/*.dll
 cluster/newoldsampler/results/*
 cluster/cubes/results/*
 figures/*
+fmridata/*
+simulations/*

@@ -82,7 +82,7 @@ adjustTykohonov <- function(obsDiff, obsmean, mu, selected,
 
     ratio <- muDiff / (obsDiff[i] * (tykohonvSlack))
     #if(i == 2) print(c(ratio, muDiff, obsDiff[i]))
-    if(is.nan(ratio)) {
+    if(is.na(ratio)) {
       tykohonovParam[i] <- Inf
     } else if(ratio > 2) {
       tykohonovParam[i] <- tykohonovParam[i] * 1.3
@@ -101,7 +101,7 @@ adjustTykohonov <- function(obsDiff, obsmean, mu, selected,
 
 #' Compute the MLE for a selected region of interest
 #'
-#' Computes the conditionla mle for a region selected based on
+#' Computes the conditional mle for a region selected based on
 #' the selection rule \code{y[selected] > threshold} or
 #' \code{y[selected] < -threshold}, and the coordinates which were not
 #' selected must violate the selection rule.
@@ -159,8 +159,8 @@ adjustTykohonov <- function(obsDiff, obsmean, mu, selected,
 #' @param imputeBoundary the boundary imputation method to use. See
 #' description for details
 #'
-#'
 #' @import Matrix
+#' @import progress
 #' @export
 roiMLE <- function(y, cov, threshold,
                    coordinates = NULL,
@@ -176,7 +176,8 @@ roiMLE <- function(y, cov, threshold,
                    assumeConvergence = 1500,
                    nsamp = 0,
                    init = NULL,
-                   imputeBoundary = c("neighbors", "none", "mean")) {
+                   progress = FALSE,
+                   imputeBoundary = c("smooth", "neighbors", "none", "mean")) {
   maxiter <- max(maxiter, assumeConvergence + length(y) + 1)
   # Basic checks and preliminaries ---------
   if(!(length(threshold) %in% c(1, length(y)))) {
@@ -206,6 +207,18 @@ roiMLE <- function(y, cov, threshold,
       distances <- as.matrix(dist(coordinates))
       diag(distances) <- Inf
       neighbors <- cbind(unselected, apply(distances[unselected, , drop = FALSE], 1, function(x) which(selected)[which.min(x[selected])[1]]))
+    }
+  } else if(imputeBoundary == "smooth") {
+    if(!is.null(coordinates)) {
+      distances <- as.matrix(dist(coordinates), method = "manhattan")
+      distances <- distances[!selected, selected]
+      SMOOTH_SD <- 1.5
+      smooth_weights <- dnorm(distances, sd = SMOOTH_SD)
+      if(sum(!selected) == 1) {
+        smooth_weights <- smooth_weights / sum(smooth_weights)
+      } else {
+        smooth_weights <- apply(smooth_weights, 1, function(x) x / sum(x)) %>% t()
+      }
     }
   }
 
@@ -293,8 +306,10 @@ roiMLE <- function(y, cov, threshold,
   lth[!selected] <- -lth[!selected]
   uth[!selected] <- -uth[!selected]
   sampMat <- matrix(0.0, nrow = sampPerIter, ncol = length(y))
+  gradNorm <- diag(invcov)
   #############################
 
+  if(progress) pb <- txtProgressBar(min = 0, max = maxiter, style = 3)
   for(i in 2:maxiter) {
     # SLICE SAMPLING!
     sampInit <- currentSamp
@@ -311,9 +326,9 @@ roiMLE <- function(y, cov, threshold,
     samp <- colMeans(sampMat)
 
     # Computing gradient ---------------
-    if(i == assumeConvergence) {
-      stepSizeCoef <- 0
-    }
+    # if(i == assumeConvergence) {
+    #   stepSizeCoef <- 0
+    # }
     condExp <- as.numeric(invcov %*% samp)
     if(tykohonovParam[1] > 0 & sum(selected) > 1) {
       firstGrad <- - as.numeric(firstDiff %*% mu[selected]) * tykohonovParam[1]
@@ -331,38 +346,53 @@ roiMLE <- function(y, cov, threshold,
     # Computing gradient and projecting if necessary
     # The projection of the gradient is simply setting its mean to zero
     rawGradient <- (suffStat - condExp + barrierGrad)
-    #gradSamp[i - 1, ] <- rawGradient[selected] # no longer used
-    gradient <-  rawGradient / max(i - delay, 1) * stepSizeCoef
+    gradNorm <- 0.995 * gradNorm + 0.005 * rawGradient^2
+    if(i == 2) {
+      MOM_CONST <- 0.2
+      momentum_grad <- rawGradient * (1 - MOM_CONST) * 2
+    } else {
+      momentum_grad <- momentum_grad * MOM_CONST + rawGradient * (1 - MOM_CONST)
+    }
+    effective_step_coef <- stepSizeCoef / max(i - delay, 1)^stepRate
+    gradient <-  momentum_grad / sqrt(gradNorm) * effective_step_coef
+    #### TEST DIAGNOSTICS -------
+    # cat("gradient mean: ", mean(gradient) / effective_step_coef, "\n")
+    # cat("gradient momentum: ", momentum_grad, "\n")
+    # cat("gradient (sqrt) norm: ", sqrt(gradNorm), "\n")
+    ###########################
     gradient[!selected] <- 0
     gradsign <- sign(gradient)
-    gradient <- pmin(abs(gradient), 0.1) * gradsign
+    gradient <- pmin(abs(gradient), 0.1 * sqrt(vars)) * gradsign
     if(!is.null(projected)) {
-      gradient <- gradient * sqrt(vars)
+      # gradient <- gradient * sqrt(vars)
       gradMean <- mean(gradient[selected])
       gradient[selected] <- gradient[selected] - gradMean
-      gradient <- gradient / sqrt(vars)
+      # gradient <- gradient / sqrt(vars)
     }
 
     # Updating estimate. The error thing is to make sure we didn't accidently
     # cross the barrier. There might be a better way to do this.
     mu <- mu + gradient
 
-    #### EXPERIMENTAL #######
+    # Boundary imputation
     if(imputeBoundary != "none") {
       if(imputeBoundary == "mean") {
         mu[!selected] <- mean(mu[selected])
       } else if(imputeBoundary == "neighbors") {
-        mu[neighbors[, 1]] <- mu[neighbors[, 2]] * (y[neighbors[, 1]] / y[neighbors[, 2]])
+        mu[neighbors[, 1]] <- mu[neighbors[, 2]] * abs(y[neighbors[, 1]] / y[neighbors[, 2]])
+      } else if(imputeBoundary == "smooth") {
+        mu[!selected] <- smooth_weights %*% mu[selected]
       }
     }
-    #########################
 
     if(is.null(projected)) {
+      mu <- pmax(0, mu * sign(y)) * sign(y)
       mu <- pmin(abs(mu), abs(y)) * sign(y)
     }
 
     # Updating Tykohonov Params
-    if(i > assumeConvergence / 3 & !slackAdjusted &
+    if(i > assumeConvergence / 3 &
+       !slackAdjusted &
        is.null(projected) &
        sum(selected) > 1) {
       tykohonovSlack <- pmax(tykohonovSlack * mean(mu[selected]) / obsmean, 10^-3)
@@ -375,7 +405,9 @@ roiMLE <- function(y, cov, threshold,
                                         tykohonovSlack, tykohonovParam)
     }
     estimates[i, ] <- mu
+    if(progress) setTxtProgressBar(pb, i)
   }
+  if(progress) close(pb)
   #cat("\n")
 
   # Sampling from estimated mean --------
@@ -392,12 +424,12 @@ roiMLE <- function(y, cov, threshold,
   }
 
   # Unnormalizing estimates and samples --------------------------
-  for(i in 1:length(y)) {
-    if(nsamp > 0) {
-      outSamples[, i] <- outSamples[, i] * sqrt(vars[i])
-    }
-    estimates[, i] <- estimates[, i] * sqrt(vars[i])
-  }
+  # for(i in 1:length(y)) {
+  #   if(nsamp > 0) {
+  #     outSamples[, i] <- outSamples[, i] * sqrt(vars[i])
+  #   }
+  #   estimates[, i] <- estimates[, i] * sqrt(vars[i])
+  # }
 
   conditional <- colMeans(estimates[assumeConvergence:maxiter, ])
   return(list(sample = outSamples,
