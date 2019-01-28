@@ -212,7 +212,7 @@ roiMLE <- function(y, cov, threshold,
     if(!is.null(coordinates)) {
       distances <- as.matrix(dist(coordinates), method = "manhattan")
       distances <- distances[!selected, selected]
-      SMOOTH_SD <- 1.5
+      SMOOTH_SD <- 0.25
       smooth_weights <- dnorm(distances, sd = SMOOTH_SD)
       if(sum(!selected) == 1) {
         smooth_weights <- smooth_weights / sum(smooth_weights)
@@ -309,6 +309,15 @@ roiMLE <- function(y, cov, threshold,
   gradNorm <- diag(invcov)
   #############################
 
+  ### New projection method
+  if(!is.null(projected)){
+    weight_vec <- rep(1, sum(selected)) / sum(selected)
+    sub_invcov <- invcov[selected, selected]
+    mahal_vec <- as.numeric(sub_invcov %*% weight_vec)
+    mahal_const <- sum(mahal_vec * weight_vec)
+  }
+  ###
+
   if(progress) pb <- txtProgressBar(min = 0, max = maxiter, style = 3)
   for(i in 2:maxiter) {
     # SLICE SAMPLING!
@@ -365,8 +374,9 @@ roiMLE <- function(y, cov, threshold,
     gradient <- pmin(abs(gradient), 0.1 * sqrt(vars)) * gradsign
     if(!is.null(projected)) {
       # gradient <- gradient * sqrt(vars)
-      gradMean <- mean(gradient[selected])
-      gradient[selected] <- gradient[selected] - gradMean
+      selected_gradient <- gradient[selected]
+      proj_adjust <- -sum(weight_vec * selected_gradient) / mahal_const * mahal_vec
+      gradient[selected] <- selected_gradient + proj_adjust
       # gradient <- gradient / sqrt(vars)
     }
 
