@@ -1,0 +1,5 @@
+001 -- intial experiment, varying the tykhonov slack exponent [COVERAE RATE CALCULATED INCORRECTLY]
+002 -- exprimenting with different boundary imputation methods [COVERAE RATE CALCULATED INCORRECTLY]
+003 -- experimenting with both tykohonov slack exponents and imputation methods, corrected the way 
+coverage is computed.
+004 -- experiments with different tuning parameters
