@@ -3,3 +3,4 @@
 003 -- experimenting with both tykohonov slack exponents and imputation methods, corrected the way 
 coverage is computed.
 004 -- experiments with different tuning parameters
+005 -- more tuning, changing samples per iteration
