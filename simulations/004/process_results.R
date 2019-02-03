@@ -1,7 +1,8 @@
 library(data.table)
 library(ggplot2)
+library(magrittr)
 
-sim_results_dir <- "simulations/003/results"
+sim_results_dir <- "simulations/004/results"
 files <- dir(sim_results_dir)
 files <- paste(sim_results_dir, "/", files, sep = "")
 param_list <- vector(length(files), mode = "list")
@@ -23,63 +24,65 @@ for(i in 1:length(files)) {
 results <- rbindlist(result_list)
 parameters <- rbindlist(param_list)
 results <- merge(parameters, results, by = "sim_id")
-results[, dim_type := "2D"]
-results$dim_type[sapply(results$dims, function(x) x[1] == 200)] <- "1D"
 results[, seed := NULL]
-results[, dims := NULL]
 
 # Estimation error ----------------
-estimation_error <- results[, .(sim_id, dim_type, threshold, mu_sd, noise_sd,
-                                imputation_method,
-                                bandwidth_sd, n_selected,
-                                obs_mean, mle, true_mean)]
+est_cols <- setdiff(names(results), c("samp_size", "tyk_exp", "min_size", "distance_threshold",
+                                      "q025.2.5%", "q975.97.5%", "covered.2.5%", "naive_cover",
+                                      "imp_cover.2.5%", "size"))
+estimation_error <- results[, .SD, .SDcols = est_cols]
 estimation_error <- melt(estimation_error,
-                         id.vars = c("sim_id", "threshold", "mu_sd", "noise_sd",
-                                     "bandwidth_sd", "n_selected", "dim_type", "true_mean",
-                                     "imputation_method"),
+                         id.vars = setdiff(est_cols, c("obs_mean", "mle")),
                          value.name = "estimate", variable.name = "method")
 estimation_error <- estimation_error[, .(rmse = sqrt(mean((estimate - true_mean)^2)),
                                          wrmse = sqrt(weighted.mean((estimate - true_mean)^2,
                                                                     w = n_selected))),
-                                     by = .(sim_id, threshold, mu_sd, noise_sd, bandwidth_sd,
-                                            dim_type, method, imputation_method)]
+                                     by = .(sim_id, imputation_method, grad_step_rate, grad_step_size,
+                                            grad_iterations, threshold, mu_sd, noise_sd,
+                                            bandwidth_sd, rho, dims, method)]
 estimation_error <- melt(estimation_error,
-                         id.vars = c("sim_id", "threshold", "mu_sd", "noise_sd",
-                                     "bandwidth_sd", "dim_type", "method",
-                                     "imputation_method"),
+                         id.vars = setdiff(names(estimation_error), c("rmse", "wrmse")),
                          variable.name = "error_type", value.name = "error")
 estimation_error <- estimation_error[, .(mean_error = mean(error), sd_error = sd(error) / sqrt(.N)),
-                                     by = .(threshold, mu_sd, noise_sd, bandwidth_sd, dim_type, method,
-                                            error_type, imputation_method)]
-ggplot(estimation_error, aes(x = mu_sd, y = mean_error, col = imputation_method, linetype = method)) +
-  facet_grid(dim_type + error_type ~ bandwidth_sd + threshold, scales = "free", labeller = "label_both") +
-  theme_bw() +
-  geom_line()
+                                     by = .(imputation_method, grad_step_rate, grad_step_size,
+                                            grad_iterations, threshold, mu_sd, noise_sd,
+                                            bandwidth_sd, rho, dims, method, error_type)]
+estimation_error[, tune := sprintf("rate%s_size%s_iter%s",
+                                   grad_step_rate, grad_step_size, grad_iterations)]
+ggplot(estimation_error, aes(x = mu_sd, y = mean_error, col = tune, linetype = method)) +
+  facet_grid(dims + error_type ~ rho + bandwidth_sd + threshold, scales = "free", labeller = "label_both") +
+  theme_bw() +  geom_line()
+
+rankings <- estimation_error[order(dims, mu_sd, threshold, bandwidth_sd, rho, method, mean_error)][error_type == "rmse" & method == "mle"]
+rankings <- rankings[, .(best = tune[1], worst = tune[.N]),
+                     by = .(threshold, mu_sd, noise_sd, bandwidth_sd, rho, dims)]
+rankings[order(best)]
 
 # Coverage rate -------------
 setnames(results, c("covered.2.5%", "naive_cover", "imp_cover.2.5%"), c("profile", "naive", "union"))
-coverage_rate <- results[, .(size, sim_id, imputation_method, threshold, mu_sd, tyk_exp,
-                             noise_sd, bandwidth_sd, profile, naive, union, dim_type)]
-coverage_rate <- melt(coverage_rate, id.vars = c("size", "imputation_method", "threshold", "tyk_exp",
-                                           "mu_sd", "noise_sd", "bandwidth_sd", "sim_id", "dim_type"),
+cover_cols <- setdiff(names(results), c("imputation_method", "min_size", "size", "true_mean",
+                                        "obs_mean", "mle", "q025.2.5%", "q975.97.5%"))
+coverage_rate <- results[, .SD, .SDcols = cover_cols]
+coverage_rate <- melt(coverage_rate, id.vars = setdiff(cover_cols, c("profile", "naive", "union")),
                       variable.name = "ci_method", value.name = "coverage")
 coverage_rate <- coverage_rate[, .(cover = mean(coverage),
-                             wcover = weighted.mean(coverage, size)),
-                         by = .(sim_id, threshold, mu_sd, noise_sd, bandwidth_sd, dim_type, imputation_method,
-                                ci_method, tyk_exp)]
+                                   wcover = weighted.mean(coverage, n_selected)),
+                         by = .(sim_id, grad_step_size, grad_step_rate, grad_iterations, samp_size, tyk_exp,
+                                threshold, mu_sd, bandwidth_sd, rho, dims, ci_method)]
 coverage_rate <- coverage_rate[, .(cover = mean(cover),
                                    wcover = mean(wcover)),
-                               by = .(threshold, mu_sd, noise_sd, bandwidth_sd, dim_type, imputation_method,
-                                      ci_method, tyk_exp)]
+                               by = .(grad_step_size, grad_step_rate, grad_iterations, samp_size, tyk_exp,
+                                      threshold, mu_sd, bandwidth_sd, rho, dims, ci_method)]
 coverage_rate <- melt(coverage_rate,
-                      id.vars = c("threshold", "mu_sd", "noise_sd", "bandwidth_sd", "dim_type", "imputation_method",
-                                  "ci_method", "tyk_exp"),
+                      id.vars = setdiff(names(coverage_rate), c("cover", "wcover")),
                       variable.name = "measure", value.name = "coverage")
-ggplot(subset(coverage_rate, tyk_exp == 1),
-       aes(x = mu_sd, y = coverage, col = factor(imputation_method), linetype = factor(ci_method))) +
+coverage_rate[, tune := sprintf("size%s_rate%s_iter%s",
+                                grad_step_size, grad_step_rate, grad_iterations)]
+ggplot(coverage_rate[ci_method == "profile" & measure == "wcover"],
+       aes(x = mu_sd, y = coverage, col = tune, linetype = factor(samp_size))) +
   geom_line() +
   theme_bw() +
-  facet_grid(dim_type + measure~ bandwidth_sd + threshold, scales = "free", labeller = "label_both") +
+  facet_grid(dims + threshold ~ rho + bandwidth_sd, scales = "free", labeller = "label_both") +
   geom_hline(yintercept = 0.95)
 
 
