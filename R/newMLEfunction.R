@@ -174,7 +174,9 @@ roiMLE <- function(y, cov, threshold,
                    delay = 100,
                    maxiter = 2000,
                    assumeConvergence = 1500,
-                   nsamp = 0,
+                   sampling_params = c(samp_per_chain = 5000,
+                                       burnin = 1000,
+                                       n_chains = 10),
                    init = NULL,
                    progress = FALSE,
                    imputeBoundary = c("smooth", "neighbors", "none", "mean")) {
@@ -318,6 +320,10 @@ roiMLE <- function(y, cov, threshold,
   }
   ###
 
+  # Saving some samples
+  samples_for_init <- matrix(NA, nrow = floor((maxiter - assumeConvergence) / 10), ncol = length(y))
+  init_mat_row <- 1
+
   if(progress) pb <- txtProgressBar(min = 0, max = maxiter, style = 3)
   for(i in 2:maxiter) {
     # SLICE SAMPLING!
@@ -333,6 +339,10 @@ roiMLE <- function(y, cov, threshold,
     sampMat <- t(t(sampMat) + sampmu)
     sampMat[, !selected] <- -sampMat[, !selected]
     samp <- colMeans(sampMat)
+    if(i > assumeConvergence & i %% 10 == 0) {
+      samples_for_init[init_mat_row, ] <- sampMat[nrow(sampMat), ]
+      init_mat_row <- init_mat_row + 1
+    }
 
     # Computing gradient ---------------
     # if(i == assumeConvergence) {
@@ -422,24 +432,38 @@ roiMLE <- function(y, cov, threshold,
 
   # Sampling from estimated mean --------
   sampmu <- colMeans(estimates[assumeConvergence:maxiter, ])
+  nsamp <- sampling_params[1]
+  n_chains <- max(sampling_params[3], 1)
+  burnin <- max(0, sampling_params[2])
+  # browser()
   if(nsamp > 0) {
-    # browser()
-    initsamp <- y
-    initsamp[!selected] <- -initsamp[!selected]
-    sampmu[!selected] <- -sampmu[!selected]
-    outSamples <- sliceRcppInner(nsamp, initsamp, sampmu, chol, lth, uth)
-    outSamples[, !selected] <- -outSamples[, !selected]
+    sample_list <- vector(n_chains, mode = "list")
+    if(n_chains > 1 & nrow(samples_for_init) > 1) {
+      init_replace <- n_chains > nrow(samples_for_init) + 1
+      # browser()
+      samples_for_init <- samples_for_init[sample.int(nrow(samples_for_init),
+                                                       size = n_chains - 1 ,
+                                                       replace = init_replace), ]
+    }
+
+    for(i in 1:n_chains) {
+      # browser()
+      if(i == 1 | nrow(samples_for_init) < 2) {
+        initsamp <- y
+      } else {
+        # browser()
+        initsamp <- samples_for_init[i - 1, ]
+      }
+      initsamp[!selected] <- -initsamp[!selected]
+      sampmu[!selected] <- -sampmu[!selected]
+      sample_list[[i]] <- sliceRcppInner(nsamp, initsamp, sampmu, chol, lth, uth)
+      sample_list[[i]][, !selected] <- -sample_list[[i]][, !selected]
+      sample_list[[i]] <- sample_list[[i]][(burnin + 1):nrow(sample_list[[i]]), ]
+    }
+    outSamples <- do.call("rbind", sample_list)
   } else {
     outSamples <- NULL
   }
-
-  # Unnormalizing estimates and samples --------------------------
-  # for(i in 1:length(y)) {
-  #   if(nsamp > 0) {
-  #     outSamples[, i] <- outSamples[, i] * sqrt(vars[i])
-  #   }
-  #   estimates[, i] <- estimates[, i] * sqrt(vars[i])
-  # }
 
   conditional <- colMeans(estimates[assumeConvergence:maxiter, ])
   return(list(sample = outSamples,

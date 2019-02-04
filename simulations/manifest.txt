@@ -4,3 +4,4 @@
 coverage is computed.
 004 -- experiments with different tuning parameters
 005 -- more tuning, changing samples per iteration
+006 -- experiments with running multiple MC chains when sampling at profile likelihood estimate

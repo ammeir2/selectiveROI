@@ -7,9 +7,10 @@
 roiMLE(y, cov, threshold, coordinates = NULL, selected = NULL,
   projected = NULL, tykohonovParam = NULL, tykohonovSlack = 1,
   stepSizeCoef = 0.15, stepRate = 0.65, sampPerIter = 40, delay = 100,
-  maxiter = 2000, assumeConvergence = 1500, nsamp = 0, init = NULL,
-  progress = FALSE, imputeBoundary = c("smooth", "neighbors", "none",
-  "mean"))
+  maxiter = 2000, assumeConvergence = 1500,
+  sampling_params = c(samp_per_chain = 5000, burnin = 1000, n_chains = 10),
+  init = NULL, progress = FALSE, imputeBoundary = c("smooth", "neighbors",
+  "none", "mean"))
 }
 \arguments{
 \item{y}{the observed noraml coordinates}
@@ -57,13 +58,13 @@ the stochastic gradient step size}
 convergence? The final MLE estimate will be the average of the last
 \code{maxiter - assumeConvergence} estimates}
 
-\item{nsamp}{the number of samples to take from the estimated
-post-selection distribution}
-
 \item{init}{initial value for the mean estimate}
 
 \item{imputeBoundary}{the boundary imputation method to use. See
 description for details}
+
+\item{nsamp}{the number of samples to take from the estimated
+post-selection distribution}
 }
 \description{
 Computes the conditional mle for a region selected based on
