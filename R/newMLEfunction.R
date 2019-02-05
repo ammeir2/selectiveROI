@@ -1,3 +1,395 @@
+#' Compute the MLE for a selected region of interest
+#'
+#' Computes the conditional mle for a region selected based on
+#' the selection rule \code{y[selected] > threshold} or
+#' \code{y[selected] < -threshold}, and the coordinates which were not
+#' selected must violate the selection rule.
+#'
+#' @param y the observed noraml coordinates
+#'
+#' @param cov the covariance of \code{y}
+#'
+#' @param threshold the threshold used in the selection rule.
+#' Must be either a scalar or a numeric vector of size \code{length(y)}
+#'
+#' @param coordinates an optional matrix of the coordinates of the observed
+#' vector. This is only relevant if \code{y} corresponds to a spatial
+#' or temporal observation
+#'
+#' @param selected an optional boolean vector, with \code{TRUE} coordinates
+#' corresponding to coordinates of \code{y} that were selected.
+#'
+#' @param projected an optional fixed value that \code{mean(mu)} must equal.
+#' Can be used to construct profile likelihood post-selection confidence
+#' intervals.
+#'
+#' @param regularization_param an optional penalty value for the tykohonov
+#' regularizer. This is an (inferior) altenative to specifying a
+#' \code{regularization_slack}.
+#'
+#' @param regularization_slack the estimation routine uses first differences
+#' Tykohonov regularization to estimate the mean of the selected region.
+#' \code{regularization_slack} speficies the allowed deviation from the observed
+#' first order differences. The description for details
+#'
+#' @param step_size_coef step size coefficients for stochastic gradient step.
+#' Best left unchanged.
+#'
+#' @param step_rate the rate at which the stochastic gradient steps size should
+#' decrease as a function of the number of steps already taken.
+#'
+#' @param samp_per_iter the number of slice MH samples to take for computing the
+#' stochastic gradient estimate in each stochastic gradient step
+#'
+#' @param grad_delay the number of iterations to wait before starting to decrease
+#' the stochastic gradient step size
+#'
+#' @param grad_iterations the number of stochastic gradient steps to take
+#'
+#' @param assume_convergence after how many gradient steps should we assume
+#' convergence? The final MLE estimate will be the average of the last
+#' \code{grad_iterations - assume_convergence} estimates
+#'
+#' @param nsamp the number of samples to take from the estimated
+#' post-selection distribution
+#'
+#' @param init initial value for the mean estimate
+#'
+#' @param impute_boundary the boundary imputation method to use. See
+#' description for details
+#'
+#' @import Matrix
+#' @import progress
+#' @export
+roiMLE <- function(y, cov, threshold,
+                   coordinates = NULL,
+                   selected = NULL,
+                   projected = NULL,
+                   regularization_param = NULL,
+                   regularization_slack = 1,
+                   init = NULL,
+                   progress = FALSE,
+                   control = mle_control()) {
+  list2env(control, environment())
+  grad_iterations <- max(grad_iterations, assume_convergence + length(y) + 1)
+  # Basic checks and preliminaries ---------
+  if(!(length(threshold) %in% c(1, length(y)))) {
+    stop("threshold must be either: a scalar, or a numeric vector of size
+         length(y).")
+  }
+
+  if(length(threshold) == 1) {
+    threshold <- rep(threshold, length(y))
+  }
+
+  if(is.null(selected)){
+    selected <- abs(y) > threshold
+  }
+  nselected <- sum(selected)
+  p <- length(y)
+  s <- sum(selected)
+  if(!all(sign(y[selected]) == sign(y[selected][1]))) stop("Signs of active set must be identical")
+
+  # Setting up boundary imputation ----------
+  if(length(impute_boundary) > 1) impute_boundary <- impute_boundary[1]
+  if(impute_boundary == "neighbors") {
+    if(is.null(coordinates)) {
+      impute_boundary <- "mean"
+    } else {
+      unselected <- which(!selected)
+      distances <- as.matrix(dist(coordinates))
+      diag(distances) <- Inf
+      neighbors <- cbind(unselected, apply(distances[unselected, , drop = FALSE], 1, function(x) which(selected)[which.min(x[selected])[1]]))
+    }
+  } else if(impute_boundary == "smooth") {
+    if(!is.null(coordinates)) {
+      distances <- as.matrix(dist(coordinates), method = "manhattan")
+      distances <- distances[!selected, selected]
+      SMOOTH_SD <- 0.25
+      smooth_weights <- dnorm(distances, sd = SMOOTH_SD)
+      if(sum(!selected) == 1) {
+        smooth_weights <- smooth_weights / sum(smooth_weights)
+      } else {
+        smooth_weights <- apply(smooth_weights, 1, function(x) x / sum(x)) %>% t()
+      }
+    }
+  }
+
+  # Setting-up Tykohonov regularization --------------
+  if(is.infinite(regularization_slack) | sum(selected) <= 1) {
+    regularization_param <- rep(0, 2)
+  } else if(is.null(regularization_param)) {
+    regularization_param <- c(1, 0)
+  } else if(any(regularization_param < 0)) {
+    regularization_param <- c(1, 0)
+  } else if(is.null(coordinates)) {
+    regularization_slack <- 2
+    regularization_param <- c(1, 0)
+  } else if(length(regularization_param) == 1) {
+    regularization_param <- rep(regularization_param, 2)
+  } else {
+    regularization_param <- regularization_param[1:2]
+  }
+
+  if(any(regularization_param > 0)) {
+    tykMat <- computeTykohonov(selected, coordinates)
+    firstDiff <- tykMat$firstDiff
+    firstDiff <- as.matrix(Matrix::t(firstDiff) %*% firstDiff)
+    secondDiff <- tykMat$secondDiff
+    secondDiff <- as.matrix(Matrix::t(secondDiff) %*% secondDiff)
+  }
+
+  if(!is.null(init)) {
+    if(length(init) != length(y)) stop("If init is not NULL, then its length must match the length of y.")
+    mu <- init
+  } else {
+    mu <- y
+    mu[!selected] <- 0
+  }
+
+  sds <- sqrt(diag(cov))
+  vars <- sds^2
+  invcov <- solve(cov)
+  condSigma <- 1 / diag(invcov)
+  suffStat <- as.numeric(invcov %*% y)
+  a <- -threshold
+  b <- threshold
+  signs <- sign(y)
+  obsmean <- mean(y[selected])
+
+  # Setting up projection -----------------
+  # If a projected gradient method is used then initalization must be from
+  # a parameter which satisfies the constraint.
+  if(!is.null(projected)) {
+    mu <- mu * sqrt(vars)
+    mu[selected] <- rep(projected, sum(selected))
+    mu <- mu / sqrt(vars)
+  }
+
+  estimates <- matrix(nrow = grad_iterations, ncol = p)
+  estimates[1, ] <- mu
+
+  # Initializing Tykohonov Penalization Parameters
+  if(any(regularization_param > 0)) {
+    yselected <- y[selected]
+    obsDiff <- rep(NA, 2)
+    obsDiff[1] <- as.numeric(crossprod(yselected, crossprod(firstDiff, yselected)))
+    obsDiff[2] <- as.numeric(crossprod(yselected, crossprod(secondDiff, yselected)))
+  }
+
+  if(!is.null(projected)) {
+    slackAdjusted <- FALSE
+  } else {
+    regularization_slack <- regularization_slack * mean(mu[selected]) / obsmean
+    slackAdjusted <- TRUE
+  }
+  regularization_param <- pmax(regularization_param, 10^-3)
+
+  ############################
+  # VARIABLES FOR NEW SAMPLER
+  currentSamp <- y
+  sampsig <- cov
+  sampsig[selected, !selected] <- -sampsig[selected, !selected]
+  sampsig[!selected, selected] <- -sampsig[!selected, selected]
+  chol <- svd(sampsig)
+  chol <- chol$u %*% diag(sqrt(chol$d)) %*% t(chol$v)
+  signs <- sign(y)
+  lth <- a
+  uth <- b
+  lth[!selected] <- -lth[!selected]
+  uth[!selected] <- -uth[!selected]
+  sampMat <- matrix(0.0, nrow = samp_per_iter, ncol = length(y))
+  gradNorm <- diag(invcov)
+  #############################
+
+  ### New projection method
+  if(!is.null(projected)){
+    weight_vec <- rep(1, sum(selected)) / sum(selected)
+    sub_invcov <- invcov[selected, selected]
+    mahal_vec <- as.numeric(sub_invcov %*% weight_vec)
+    mahal_const <- sum(mahal_vec * weight_vec)
+  }
+  ###
+
+  # Saving some samples
+  samples_for_init <- matrix(NA, nrow = floor((grad_iterations - assume_convergence) / 10), ncol = length(y))
+  init_mat_row <- 1
+
+  if(progress) pb <- txtProgressBar(min = 0, max = grad_iterations, style = 3)
+  for(i in 2:grad_iterations) {
+    # SLICE SAMPLING!
+    sampInit <- currentSamp
+    sampInit[!selected] <- -sampInit[!selected]
+    sampmu <- mu
+    sampmu[!selected] <- -sampmu[!selected]
+    sampInit <- sampInit - sampmu
+
+    sliceSamplerRcpp(sampMat = sampMat, samp = sampInit,
+                     chol = chol,
+                     lth = lth - sampmu, uth = uth - sampmu)
+    sampMat <- t(t(sampMat) + sampmu)
+    sampMat[, !selected] <- -sampMat[, !selected]
+    samp <- colMeans(sampMat)
+    if(i > assume_convergence & i %% 10 == 0) {
+      samples_for_init[init_mat_row, ] <- sampMat[nrow(sampMat), ]
+      init_mat_row <- init_mat_row + 1
+    }
+
+    # Computing gradient ---------------
+    # if(i == assume_convergence) {
+    #   step_size_coef <- 0
+    # }
+    condExp <- as.numeric(invcov %*% samp)
+    if(regularization_param[1] > 0 & sum(selected) > 1) {
+      firstGrad <- - as.numeric(firstDiff %*% mu[selected]) * regularization_param[1]
+    } else {
+      firstGrad <- 0
+    }
+    if(regularization_param[2] > 0 & sum(selected) > 1) {
+      secondGrad <- - as.numeric(secondDiff %*% mu[selected]) * regularization_param[2]
+    } else {
+      secondGrad <- 0
+    }
+    barrierGrad <- rep(0, length(y))
+    barrierGrad[selected] <- firstGrad + secondGrad
+
+    # Computing gradient and projecting if necessary
+    # The projection of the gradient is simply setting its mean to zero
+    rawGradient <- (suffStat - condExp + barrierGrad)
+    gradNorm <- 0.995 * gradNorm + 0.005 * rawGradient^2
+    if(i == 2) {
+      MOM_CONST <- 0.2
+      momentum_grad <- rawGradient * (1 - MOM_CONST) * 2
+    } else {
+      momentum_grad <- momentum_grad * MOM_CONST + rawGradient * (1 - MOM_CONST)
+    }
+    effective_step_coef <- step_size_coef / max(i - grad_delay, 1)^step_rate
+    gradient <-  momentum_grad / sqrt(gradNorm) * effective_step_coef
+    #### TEST DIAGNOSTICS -------
+    # cat("gradient mean: ", mean(gradient) / effective_step_coef, "\n")
+    # cat("gradient momentum: ", momentum_grad, "\n")
+    # cat("gradient (sqrt) norm: ", sqrt(gradNorm), "\n")
+    ###########################
+    gradient[!selected] <- 0
+    gradsign <- sign(gradient)
+    gradient <- pmin(abs(gradient), 0.1 * sqrt(vars)) * gradsign
+    if(!is.null(projected)) {
+      # gradient <- gradient * sqrt(vars)
+      selected_gradient <- gradient[selected]
+      proj_adjust <- -sum(weight_vec * selected_gradient) / mahal_const * mahal_vec
+      gradient[selected] <- selected_gradient + proj_adjust
+      # gradient <- gradient / sqrt(vars)
+    }
+
+    # Updating estimate. The error thing is to make sure we didn't accidently
+    # cross the barrier. There might be a better way to do this.
+    mu <- mu + gradient
+
+    # Boundary imputation
+    if(impute_boundary != "none") {
+      if(impute_boundary == "mean") {
+        mu[!selected] <- mean(mu[selected])
+      } else if(impute_boundary == "neighbors") {
+        mu[neighbors[, 1]] <- mu[neighbors[, 2]] * abs(y[neighbors[, 1]] / y[neighbors[, 2]])
+      } else if(impute_boundary == "smooth") {
+        mu[!selected] <- smooth_weights %*% mu[selected]
+      }
+    }
+
+    if(is.null(projected)) {
+      mu <- pmax(0, mu * sign(y)) * sign(y)
+      mu <- pmin(abs(mu), abs(y)) * sign(y)
+    }
+
+    # Updating Tykohonov Params
+    if(i > assume_convergence / 3 &
+       !slackAdjusted &
+       is.null(projected) &
+       sum(selected) > 1) {
+      regularization_slack <- pmax(regularization_slack * mean(mu[selected]) / obsmean, 10^-3)
+      slackAdjusted <- TRUE
+    }
+
+    if(any(regularization_param > 0) & sum(selected) > 1) {
+      regularization_param <- adjustTykohonov(obsDiff, obsmean, mu, selected,
+                                        firstDiff, secondDiff,
+                                        regularization_slack, regularization_param)
+    }
+    estimates[i, ] <- mu
+    if(progress) setTxtProgressBar(pb, i)
+  }
+  if(progress) close(pb)
+  #cat("\n")
+
+  # Sampling from estimated mean --------
+  sampmu <- colMeans(estimates[assume_convergence:grad_iterations, ])
+  nsamp <- sampling_params[1]
+  n_chains <- max(sampling_params[3], 1)
+  burnin <- max(0, sampling_params[2])
+  # browser()
+  if(nsamp > 0) {
+    sample_list <- vector(n_chains, mode = "list")
+    if(n_chains > 1 & nrow(samples_for_init) > 1) {
+      init_replace <- n_chains > nrow(samples_for_init) + 1
+      # browser()
+      samples_for_init <- samples_for_init[sample.int(nrow(samples_for_init),
+                                                       size = n_chains - 1 ,
+                                                       replace = init_replace), ]
+    }
+
+    for(i in 1:n_chains) {
+      # browser()
+      if(i == 1 | nrow(samples_for_init) < 2) {
+        initsamp <- y
+      } else {
+        # browser()
+        initsamp <- samples_for_init[i - 1, ]
+      }
+      initsamp[!selected] <- -initsamp[!selected]
+      sampmu[!selected] <- -sampmu[!selected]
+      sample_list[[i]] <- sliceRcppInner(nsamp, initsamp, sampmu, chol, lth, uth)
+      sample_list[[i]][, !selected] <- -sample_list[[i]][, !selected]
+      sample_list[[i]] <- sample_list[[i]][(burnin + 1):nrow(sample_list[[i]]), ]
+    }
+    outSamples <- do.call("rbind", sample_list)
+  } else {
+    outSamples <- NULL
+  }
+
+  conditional <- colMeans(estimates[assume_convergence:grad_iterations, ])
+  return(list(sample = outSamples,
+              estimates = estimates,
+              conditional = conditional))
+}
+
+#' @export
+mle_control <- function(grad_iterations = 2100,
+                        step_size_coef = 0.5,
+                        step_rate = 0.55,
+                        samp_per_iter = 20,
+                        grad_delay = NULL,
+                        assume_convergence = NULL,
+                        sampling_params = c(samp_per_chain = 5000,
+                                            burnin = 1000,
+                                            n_chains = 10),
+                        impute_boundary = c("smooth", "neighbors", "none", "mean")) {
+  if(is.null(grad_delay)) {
+    grad_delay <- main(ceiling(grad_iterations / 6), 100)
+  }
+  if(is.null(assume_convergence)) {
+    assume_convergence <- floor(grad_iterations / 3)
+  }
+  control <- list(grad_iterations = grad_iterations,
+    bv ``               step_size_coef = step_size_coef,
+                  step_rate = step_rate,
+                  samp_per_iter = samp_per_iter,
+                  grad_delay = grad_delay,
+                  assume_convergence = assume_convergence,
+                  sampling_params = sampling_params,
+                  impute_boundary = impute_boundary[1])
+  return(control)
+}
+
 # Construct second differences Tykohonov Regularization matrix
 computeTykohonov <- function(selected, coordinates) {
   coordinates <- coordinates[selected, , drop = FALSE]
@@ -63,11 +455,11 @@ computeTykohonov <- function(selected, coordinates) {
 # Adjusts tykohonov parametere
 adjustTykohonov <- function(obsDiff, obsmean, mu, selected,
                             firstDiff, secondDiff,
-                            tykohonvSlack, tykohonovParam) {
+                            tykohonvSlack, regularization_param) {
   mu <- mu[selected]
   meanmu <- mean(mu)
   for(i in 1:2) {
-    if(tykohonovParam[i] == 0) next
+    if(regularization_param[i] == 0) next
 
     if(i == 1) {
       muDiff <- crossprod(mu, crossprod(firstDiff, mu))
@@ -76,397 +468,26 @@ adjustTykohonov <- function(obsDiff, obsmean, mu, selected,
     }
 
     # if(i == 1 & any(sign(mu[1]) != sign(mu)) & mean(mu) > 0.5) {
-    #   tykohonovParam[i] <- tykohonovParam[i] * 1.1
+    #   regularization_param[i] <- regularization_param[i] * 1.1
     #   next
     # }
 
     ratio <- muDiff / (obsDiff[i] * (tykohonvSlack))
     #if(i == 2) print(c(ratio, muDiff, obsDiff[i]))
     if(is.na(ratio)) {
-      tykohonovParam[i] <- Inf
+      regularization_param[i] <- Inf
     } else if(ratio > 2) {
-      tykohonovParam[i] <- tykohonovParam[i] * 1.3
+      regularization_param[i] <- regularization_param[i] * 1.3
     } else if(ratio > 1) {
-      tykohonovParam[i] <- tykohonovParam[i] * 1.05
+      regularization_param[i] <- regularization_param[i] * 1.05
     } else if(ratio < 0.5) {
-      tykohonovParam[i] <- tykohonovParam[i] * 0.7
+      regularization_param[i] <- regularization_param[i] * 0.7
     } else if(ratio < 1) {
-      tykohonovParam[i] * 0.95
+      regularization_param[i] * 0.95
     }
-    tykohonovParam[i] <- min(max(tykohonovParam[i], 10^-6), 10^8)
+    regularization_param[i] <- min(max(regularization_param[i], 10^-6), 10^8)
   }
 
-  return(tykohonovParam)
+  return(regularization_param)
 }
 
-#' Compute the MLE for a selected region of interest
-#'
-#' Computes the conditional mle for a region selected based on
-#' the selection rule \code{y[selected] > threshold} or
-#' \code{y[selected] < -threshold}, and the coordinates which were not
-#' selected must violate the selection rule.
-#'
-#' @param y the observed noraml coordinates
-#'
-#' @param cov the covariance of \code{y}
-#'
-#' @param threshold the threshold used in the selection rule.
-#' Must be either a scalar or a numeric vector of size \code{length(y)}
-#'
-#' @param coordinates an optional matrix of the coordinates of the observed
-#' vector. This is only relevant if \code{y} corresponds to a spatial
-#' or temporal observation
-#'
-#' @param selected an optional boolean vector, with \code{TRUE} coordinates
-#' corresponding to coordinates of \code{y} that were selected.
-#'
-#' @param projected an optional fixed value that \code{mean(mu)} must equal.
-#' Can be used to construct profile likelihood post-selection confidence
-#' intervals.
-#'
-#' @param tykohonovParam an optional penalty value for the tykohonov
-#' regularizer. This is an (inferior) altenative to specifying a
-#' \code{tykohonovSlack}.
-#'
-#' @param tykohonovSlack the estimation routine uses first differences
-#' Tykohonov regularization to estimate the mean of the selected region.
-#' \code{tykohonovSlack} speficies the allowed deviation from the observed
-#' first order differences. The description for details
-#'
-#' @param stepSizeCoef step size coefficients for stochastic gradient step.
-#' Best left unchanged.
-#'
-#' @param stepRate the rate at which the stochastic gradient steps size should
-#' decrease as a function of the number of steps already taken.
-#'
-#' @param sampPerIter the number of slice MH samples to take for computing the
-#' stochastic gradient estimate in each stochastic gradient step
-#'
-#' @param delay the number of iterations to wait before starting to decrease
-#' the stochastic gradient step size
-#'
-#' @param maxiter the number of stochastic gradient steps to take
-#'
-#' @param assumeConvergence after how many gradient steps should we assume
-#' convergence? The final MLE estimate will be the average of the last
-#' \code{maxiter - assumeConvergence} estimates
-#'
-#' @param nsamp the number of samples to take from the estimated
-#' post-selection distribution
-#'
-#' @param init initial value for the mean estimate
-#'
-#' @param imputeBoundary the boundary imputation method to use. See
-#' description for details
-#'
-#' @import Matrix
-#' @import progress
-#' @export
-roiMLE <- function(y, cov, threshold,
-                   coordinates = NULL,
-                   selected = NULL,
-                   projected = NULL,
-                   tykohonovParam = NULL,
-                   tykohonovSlack = 1,
-                   stepSizeCoef = 0.15,
-                   stepRate = 0.65,
-                   sampPerIter = 40,
-                   delay = 100,
-                   maxiter = 2000,
-                   assumeConvergence = 1500,
-                   sampling_params = c(samp_per_chain = 5000,
-                                       burnin = 1000,
-                                       n_chains = 10),
-                   init = NULL,
-                   progress = FALSE,
-                   imputeBoundary = c("smooth", "neighbors", "none", "mean")) {
-  maxiter <- max(maxiter, assumeConvergence + length(y) + 1)
-  # Basic checks and preliminaries ---------
-  if(!(length(threshold) %in% c(1, length(y)))) {
-    stop("threshold must be either: a scalar, or a numeric vector of size
-         length(y).")
-  }
-
-  if(length(threshold) == 1) {
-    threshold <- rep(threshold, length(y))
-  }
-
-  if(is.null(selected)){
-    selected <- abs(y) > threshold
-  }
-  nselected <- sum(selected)
-  p <- length(y)
-  s <- sum(selected)
-  if(!all(sign(y[selected]) == sign(y[selected][1]))) stop("Signs of active set must be identical")
-
-  # Setting up boundary imputation ----------
-  if(length(imputeBoundary) > 1) imputeBoundary <- imputeBoundary[1]
-  if(imputeBoundary == "neighbors") {
-    if(is.null(coordinates)) {
-      imputeBoundary <- "mean"
-    } else {
-      unselected <- which(!selected)
-      distances <- as.matrix(dist(coordinates))
-      diag(distances) <- Inf
-      neighbors <- cbind(unselected, apply(distances[unselected, , drop = FALSE], 1, function(x) which(selected)[which.min(x[selected])[1]]))
-    }
-  } else if(imputeBoundary == "smooth") {
-    if(!is.null(coordinates)) {
-      distances <- as.matrix(dist(coordinates), method = "manhattan")
-      distances <- distances[!selected, selected]
-      SMOOTH_SD <- 0.25
-      smooth_weights <- dnorm(distances, sd = SMOOTH_SD)
-      if(sum(!selected) == 1) {
-        smooth_weights <- smooth_weights / sum(smooth_weights)
-      } else {
-        smooth_weights <- apply(smooth_weights, 1, function(x) x / sum(x)) %>% t()
-      }
-    }
-  }
-
-  # Setting-up Tykohonov regularization --------------
-  if(is.infinite(tykohonovSlack) | sum(selected) <= 1) {
-    tykohonovParam <- rep(0, 2)
-  } else if(is.null(tykohonovParam)) {
-    tykohonovParam <- c(1, 0)
-  } else if(any(tykohonovParam < 0)) {
-    tykohonovParam <- c(1, 0)
-  } else if(is.null(coordinates)) {
-    tykohonovSlack <- 2
-    tykohonovParam <- c(1, 0)
-  } else if(length(tykohonovParam) == 1) {
-    tykohonovParam <- rep(tykohonovParam, 2)
-  } else {
-    tykohonovParam <- tykohonovParam[1:2]
-  }
-
-  if(any(tykohonovParam > 0)) {
-    tykMat <- computeTykohonov(selected, coordinates)
-    firstDiff <- tykMat$firstDiff
-    firstDiff <- as.matrix(Matrix::t(firstDiff) %*% firstDiff)
-    secondDiff <- tykMat$secondDiff
-    secondDiff <- as.matrix(Matrix::t(secondDiff) %*% secondDiff)
-  }
-
-  if(!is.null(init)) {
-    if(length(init) != length(y)) stop("If init is not NULL, then its length must match the length of y.")
-    mu <- init
-  } else {
-    mu <- y
-    mu[!selected] <- 0
-  }
-
-  sds <- sqrt(diag(cov))
-  vars <- sds^2
-  invcov <- solve(cov)
-  condSigma <- 1 / diag(invcov)
-  suffStat <- as.numeric(invcov %*% y)
-  a <- -threshold
-  b <- threshold
-  signs <- sign(y)
-  obsmean <- mean(y[selected])
-
-  # Setting up projection -----------------
-  # If a projected gradient method is used then initalization must be from
-  # a parameter which satisfies the constraint.
-  if(!is.null(projected)) {
-    mu <- mu * sqrt(vars)
-    mu[selected] <- rep(projected, sum(selected))
-    mu <- mu / sqrt(vars)
-  }
-
-  estimates <- matrix(nrow = maxiter, ncol = p)
-  estimates[1, ] <- mu
-
-  # Initializing Tykohonov Penalization Parameters
-  if(any(tykohonovParam > 0)) {
-    yselected <- y[selected]
-    obsDiff <- rep(NA, 2)
-    obsDiff[1] <- as.numeric(crossprod(yselected, crossprod(firstDiff, yselected)))
-    obsDiff[2] <- as.numeric(crossprod(yselected, crossprod(secondDiff, yselected)))
-  }
-
-  if(!is.null(projected)) {
-    slackAdjusted <- FALSE
-  } else {
-    tykohonovSlack <- tykohonovSlack * mean(mu[selected]) / obsmean
-    slackAdjusted <- TRUE
-  }
-  tykohonovParam <- pmax(tykohonovParam, 10^-3)
-
-  ############################
-  # VARIABLES FOR NEW SAMPLER
-  currentSamp <- y
-  sampsig <- cov
-  sampsig[selected, !selected] <- -sampsig[selected, !selected]
-  sampsig[!selected, selected] <- -sampsig[!selected, selected]
-  chol <- svd(sampsig)
-  chol <- chol$u %*% diag(sqrt(chol$d)) %*% t(chol$v)
-  signs <- sign(y)
-  lth <- a
-  uth <- b
-  lth[!selected] <- -lth[!selected]
-  uth[!selected] <- -uth[!selected]
-  sampMat <- matrix(0.0, nrow = sampPerIter, ncol = length(y))
-  gradNorm <- diag(invcov)
-  #############################
-
-  ### New projection method
-  if(!is.null(projected)){
-    weight_vec <- rep(1, sum(selected)) / sum(selected)
-    sub_invcov <- invcov[selected, selected]
-    mahal_vec <- as.numeric(sub_invcov %*% weight_vec)
-    mahal_const <- sum(mahal_vec * weight_vec)
-  }
-  ###
-
-  # Saving some samples
-  samples_for_init <- matrix(NA, nrow = floor((maxiter - assumeConvergence) / 10), ncol = length(y))
-  init_mat_row <- 1
-
-  if(progress) pb <- txtProgressBar(min = 0, max = maxiter, style = 3)
-  for(i in 2:maxiter) {
-    # SLICE SAMPLING!
-    sampInit <- currentSamp
-    sampInit[!selected] <- -sampInit[!selected]
-    sampmu <- mu
-    sampmu[!selected] <- -sampmu[!selected]
-    sampInit <- sampInit - sampmu
-
-    sliceSamplerRcpp(sampMat = sampMat, samp = sampInit,
-                     chol = chol,
-                     lth = lth - sampmu, uth = uth - sampmu)
-    sampMat <- t(t(sampMat) + sampmu)
-    sampMat[, !selected] <- -sampMat[, !selected]
-    samp <- colMeans(sampMat)
-    if(i > assumeConvergence & i %% 10 == 0) {
-      samples_for_init[init_mat_row, ] <- sampMat[nrow(sampMat), ]
-      init_mat_row <- init_mat_row + 1
-    }
-
-    # Computing gradient ---------------
-    # if(i == assumeConvergence) {
-    #   stepSizeCoef <- 0
-    # }
-    condExp <- as.numeric(invcov %*% samp)
-    if(tykohonovParam[1] > 0 & sum(selected) > 1) {
-      firstGrad <- - as.numeric(firstDiff %*% mu[selected]) * tykohonovParam[1]
-    } else {
-      firstGrad <- 0
-    }
-    if(tykohonovParam[2] > 0 & sum(selected) > 1) {
-      secondGrad <- - as.numeric(secondDiff %*% mu[selected]) * tykohonovParam[2]
-    } else {
-      secondGrad <- 0
-    }
-    barrierGrad <- rep(0, length(y))
-    barrierGrad[selected] <- firstGrad + secondGrad
-
-    # Computing gradient and projecting if necessary
-    # The projection of the gradient is simply setting its mean to zero
-    rawGradient <- (suffStat - condExp + barrierGrad)
-    gradNorm <- 0.995 * gradNorm + 0.005 * rawGradient^2
-    if(i == 2) {
-      MOM_CONST <- 0.2
-      momentum_grad <- rawGradient * (1 - MOM_CONST) * 2
-    } else {
-      momentum_grad <- momentum_grad * MOM_CONST + rawGradient * (1 - MOM_CONST)
-    }
-    effective_step_coef <- stepSizeCoef / max(i - delay, 1)^stepRate
-    gradient <-  momentum_grad / sqrt(gradNorm) * effective_step_coef
-    #### TEST DIAGNOSTICS -------
-    # cat("gradient mean: ", mean(gradient) / effective_step_coef, "\n")
-    # cat("gradient momentum: ", momentum_grad, "\n")
-    # cat("gradient (sqrt) norm: ", sqrt(gradNorm), "\n")
-    ###########################
-    gradient[!selected] <- 0
-    gradsign <- sign(gradient)
-    gradient <- pmin(abs(gradient), 0.1 * sqrt(vars)) * gradsign
-    if(!is.null(projected)) {
-      # gradient <- gradient * sqrt(vars)
-      selected_gradient <- gradient[selected]
-      proj_adjust <- -sum(weight_vec * selected_gradient) / mahal_const * mahal_vec
-      gradient[selected] <- selected_gradient + proj_adjust
-      # gradient <- gradient / sqrt(vars)
-    }
-
-    # Updating estimate. The error thing is to make sure we didn't accidently
-    # cross the barrier. There might be a better way to do this.
-    mu <- mu + gradient
-
-    # Boundary imputation
-    if(imputeBoundary != "none") {
-      if(imputeBoundary == "mean") {
-        mu[!selected] <- mean(mu[selected])
-      } else if(imputeBoundary == "neighbors") {
-        mu[neighbors[, 1]] <- mu[neighbors[, 2]] * abs(y[neighbors[, 1]] / y[neighbors[, 2]])
-      } else if(imputeBoundary == "smooth") {
-        mu[!selected] <- smooth_weights %*% mu[selected]
-      }
-    }
-
-    if(is.null(projected)) {
-      mu <- pmax(0, mu * sign(y)) * sign(y)
-      mu <- pmin(abs(mu), abs(y)) * sign(y)
-    }
-
-    # Updating Tykohonov Params
-    if(i > assumeConvergence / 3 &
-       !slackAdjusted &
-       is.null(projected) &
-       sum(selected) > 1) {
-      tykohonovSlack <- pmax(tykohonovSlack * mean(mu[selected]) / obsmean, 10^-3)
-      slackAdjusted <- TRUE
-    }
-
-    if(any(tykohonovParam > 0) & sum(selected) > 1) {
-      tykohonovParam <- adjustTykohonov(obsDiff, obsmean, mu, selected,
-                                        firstDiff, secondDiff,
-                                        tykohonovSlack, tykohonovParam)
-    }
-    estimates[i, ] <- mu
-    if(progress) setTxtProgressBar(pb, i)
-  }
-  if(progress) close(pb)
-  #cat("\n")
-
-  # Sampling from estimated mean --------
-  sampmu <- colMeans(estimates[assumeConvergence:maxiter, ])
-  nsamp <- sampling_params[1]
-  n_chains <- max(sampling_params[3], 1)
-  burnin <- max(0, sampling_params[2])
-  # browser()
-  if(nsamp > 0) {
-    sample_list <- vector(n_chains, mode = "list")
-    if(n_chains > 1 & nrow(samples_for_init) > 1) {
-      init_replace <- n_chains > nrow(samples_for_init) + 1
-      # browser()
-      samples_for_init <- samples_for_init[sample.int(nrow(samples_for_init),
-                                                       size = n_chains - 1 ,
-                                                       replace = init_replace), ]
-    }
-
-    for(i in 1:n_chains) {
-      # browser()
-      if(i == 1 | nrow(samples_for_init) < 2) {
-        initsamp <- y
-      } else {
-        # browser()
-        initsamp <- samples_for_init[i - 1, ]
-      }
-      initsamp[!selected] <- -initsamp[!selected]
-      sampmu[!selected] <- -sampmu[!selected]
-      sample_list[[i]] <- sliceRcppInner(nsamp, initsamp, sampmu, chol, lth, uth)
-      sample_list[[i]][, !selected] <- -sample_list[[i]][, !selected]
-      sample_list[[i]] <- sample_list[[i]][(burnin + 1):nrow(sample_list[[i]]), ]
-    }
-    outSamples <- do.call("rbind", sample_list)
-  } else {
-    outSamples <- NULL
-  }
-
-  conditional <- colMeans(estimates[assumeConvergence:maxiter, ])
-  return(list(sample = outSamples,
-              estimates = estimates,
-              conditional = conditional))
-}

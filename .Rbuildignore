@@ -4,15 +4,6 @@ figures/*
 cluster/*
 misc scripts/*
 fmridata/*
-simulations/001/results
-simulations/001/errors
-simulations/002/results
-simulations/002/errors
-simulations/003/results
-simulations/003/errors
-simulations/004/results
-simulations/004/errors
-simulations/005/results
-simulations/005/errors
-simulations/006/results
-simulations/006/errors
+simulations/*/results
+simulations/*/errors
+simulations/*/figures

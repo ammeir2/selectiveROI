@@ -73,22 +73,21 @@ run_sim <- function(config) {
       selected <- c(rep(TRUE, length(this_cluster)), rep(FALSE, length(boundary)))
       this_cluster <- c(this_cluster, boundary)
       this_covariance <- covariance[this_cluster, this_cluster]
+      control <- mle_control(grad_iterations = grad_iterations,
+                             step_size_coef = grad_step_size,
+                             step_rate = grad_step_rate,
+                             samp_per_iter = config[["samp_per_iter"]],
+                             grad_delay = delay,
+                             assume_convergence = assume_convergence,
+                             sampling_params = c(0, 0, 0),
+                             impute_boundary = config[["imputation_method"]])
       mle <- roiMLE(y = y[this_cluster],
                     cov = this_covariance, threshold,
                     coordinates = coordinates[this_cluster, , drop = FALSE],
                     selected = selected,
-                    projected = NULL,
-                    tykohonovParam = NULL,
-                    tykohonovSlack = 1,
-                    stepSizeCoef = grad_step_size,
-                    stepRate = grad_step_rate,
-                    sampPerIter = config[["samp_per_iter"]],
-                    delay = delay,
-                    maxiter = grad_iterations,
-                    assumeConvergence = assume_convergence,
-                    sampling_params = c(0, 0, 0),
-                    imputeBoundary = config[["imputation_method"]],
-                    progress = TRUE)
+                    regularization_slack = 1,
+                    progress = TRUE,
+                    control = control)
       # if(FALSE) {
       #   plot_coord <- 1
       #   plot(mle$estimates[, plot_coord])
@@ -102,24 +101,17 @@ run_sim <- function(config) {
 
       true_mean <- mean(mu[this_cluster][selected])
       obs_mean <- mean(y[this_cluster][selected])
+      control$sampling_params <- c(config[["samp_size"]],
+                                   config[["burnin"]],
+                                   config[["n_chains"]])
       profile_mle <- roiMLE(y = y[this_cluster],
                             cov = this_covariance, threshold,
                             coordinates = coordinates[this_cluster, , drop = FALSE],
                             selected = selected,
                             projected = true_mean,
-                            tykohonovParam = NULL,
-                            tykohonovSlack = abs(true_mean / obs_mean)^config[["tyk_exp"]],
-                            stepSizeCoef = grad_step_size,
-                            stepRate = grad_step_rate,
-                            sampPerIter = config[["samp_per_iter"]],
-                            delay = delay,
-                            maxiter = grad_iterations,
-                            assumeConvergence = assume_convergence,
-                            sampling_params = c(config[["samp_size"]],
-                                                config[["burnin"]],
-                                                config[["n_chains"]]),
-                            imputeBoundary = config[["imputation_method"]],
-                            progress = TRUE)
+                            regularization_slack = abs(true_mean / obs_mean)^config[["tyk_exp"]],
+                            progress = TRUE,
+                            control = control)
       samp <- rowMeans(profile_mle$sample[, selected])
       quants <- quantile(samp, probs = c(0.025, 0.975))
       covered <- quants[1] < obs_mean & quants[2] > obs_mean

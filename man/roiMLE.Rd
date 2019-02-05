@@ -5,12 +5,8 @@
 \title{Compute the MLE for a selected region of interest}
 \usage{
 roiMLE(y, cov, threshold, coordinates = NULL, selected = NULL,
-  projected = NULL, tykohonovParam = NULL, tykohonovSlack = 1,
-  stepSizeCoef = 0.15, stepRate = 0.65, sampPerIter = 40, delay = 100,
-  maxiter = 2000, assumeConvergence = 1500,
-  sampling_params = c(samp_per_chain = 5000, burnin = 1000, n_chains = 10),
-  init = NULL, progress = FALSE, imputeBoundary = c("smooth", "neighbors",
-  "none", "mean"))
+  projected = NULL, regularization_param = NULL, regularization_slack = 1,
+  init = NULL, progress = FALSE, control = mle_control())
 }
 \arguments{
 \item{y}{the observed noraml coordinates}
@@ -31,40 +27,40 @@ corresponding to coordinates of \code{y} that were selected.}
 Can be used to construct profile likelihood post-selection confidence
 intervals.}
 
-\item{tykohonovParam}{an optional penalty value for the tykohonov
+\item{regularization_param}{an optional penalty value for the tykohonov
 regularizer. This is an (inferior) altenative to specifying a
-\code{tykohonovSlack}.}
+\code{regularization_slack}.}
 
-\item{tykohonovSlack}{the estimation routine uses first differences
+\item{regularization_slack}{the estimation routine uses first differences
 Tykohonov regularization to estimate the mean of the selected region.
-\code{tykohonovSlack} speficies the allowed deviation from the observed
+\code{regularization_slack} speficies the allowed deviation from the observed
 first order differences. The description for details}
-
-\item{stepSizeCoef}{step size coefficients for stochastic gradient step.
-Best left unchanged.}
-
-\item{stepRate}{the rate at which the stochastic gradient steps size should
-decrease as a function of the number of steps already taken.}
-
-\item{sampPerIter}{the number of slice MH samples to take for computing the
-stochastic gradient estimate in each stochastic gradient step}
-
-\item{delay}{the number of iterations to wait before starting to decrease
-the stochastic gradient step size}
-
-\item{maxiter}{the number of stochastic gradient steps to take}
-
-\item{assumeConvergence}{after how many gradient steps should we assume
-convergence? The final MLE estimate will be the average of the last
-\code{maxiter - assumeConvergence} estimates}
 
 \item{init}{initial value for the mean estimate}
 
-\item{imputeBoundary}{the boundary imputation method to use. See
-description for details}
+\item{step_size_coef}{step size coefficients for stochastic gradient step.
+Best left unchanged.}
+
+\item{step_rate}{the rate at which the stochastic gradient steps size should
+decrease as a function of the number of steps already taken.}
+
+\item{samp_per_iter}{the number of slice MH samples to take for computing the
+stochastic gradient estimate in each stochastic gradient step}
+
+\item{grad_delay}{the number of iterations to wait before starting to decrease
+the stochastic gradient step size}
+
+\item{grad_iterations}{the number of stochastic gradient steps to take}
+
+\item{assume_convergence}{after how many gradient steps should we assume
+convergence? The final MLE estimate will be the average of the last
+\code{grad_iterations - assume_convergence} estimates}
 
 \item{nsamp}{the number of samples to take from the estimated
 post-selection distribution}
+
+\item{impute_boundary}{the boundary imputation method to use. See
+description for details}
 }
 \description{
 Computes the conditional mle for a region selected based on
