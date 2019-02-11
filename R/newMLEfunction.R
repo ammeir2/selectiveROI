@@ -19,6 +19,13 @@
 #' @param selected an optional boolean vector, with \code{TRUE} coordinates
 #' corresponding to coordinates of \code{y} that were selected.
 #'
+#' @param mean_weights the weights to use for the contrast to be computed, if
+#' not specified then equal weights will be given to all selected coordinates.
+#' \code{mean_weights} do not have to sum to one. If specified, then the length
+#' of the vector must either equal \code{sum(selected)} (the number of selected
+#' coordinates), or \code{length(y)}. Either way, all coordinates which were not
+#' selected must be given a weight of zero.
+#'
 #' @param projected an optional fixed value that \code{mean(mu)} must equal.
 #' Can be used to construct profile likelihood post-selection confidence
 #' intervals.
@@ -32,31 +39,16 @@
 #' \code{regularization_slack} speficies the allowed deviation from the observed
 #' first order differences. The description for details
 #'
-#' @param step_size_coef step size coefficients for stochastic gradient step.
-#' Best left unchanged.
-#'
-#' @param step_rate the rate at which the stochastic gradient steps size should
-#' decrease as a function of the number of steps already taken.
-#'
-#' @param samp_per_iter the number of slice MH samples to take for computing the
-#' stochastic gradient estimate in each stochastic gradient step
-#'
-#' @param grad_delay the number of iterations to wait before starting to decrease
-#' the stochastic gradient step size
-#'
-#' @param grad_iterations the number of stochastic gradient steps to take
-#'
-#' @param assume_convergence after how many gradient steps should we assume
-#' convergence? The final MLE estimate will be the average of the last
-#' \code{grad_iterations - assume_convergence} estimates
-#'
-#' @param nsamp the number of samples to take from the estimated
-#' post-selection distribution
-#'
 #' @param init initial value for the mean estimate
 #'
-#' @param impute_boundary the boundary imputation method to use. See
-#' description for details
+#' @param progress whether to display a bar describing the progress
+#' of the gradient algorithm.
+#'
+#' @param sampling_control a list with control parameters for sampling
+#' from the estimated distribution.
+#'
+#' @param mle_contorl a list of parameters to be used when computed the
+#' conditional MLE.
 #'
 #' @import Matrix
 #' @import progress
@@ -64,13 +56,15 @@
 roiMLE <- function(y, cov, threshold,
                    coordinates = NULL,
                    selected = NULL,
+                   mean_weights = NULL,
                    projected = NULL,
                    regularization_param = NULL,
                    regularization_slack = 1,
                    init = NULL,
                    progress = FALSE,
-                   control = mle_control()) {
-  list2env(control, environment())
+                   sampling_control = roi_sampling_control(),
+                   mle_control = roi_mle_control()) {
+  list2env(mle_control, environment())
   grad_iterations <- max(grad_iterations, assume_convergence + length(y) + 1)
   # Basic checks and preliminaries ---------
   if(!(length(threshold) %in% c(1, length(y)))) {
@@ -202,17 +196,31 @@ roiMLE <- function(y, cov, threshold,
   gradNorm <- diag(invcov)
   #############################
 
-  ### New projection method
-  if(!is.null(projected)){
-    weight_vec <- rep(1, sum(selected)) / sum(selected)
-    sub_invcov <- invcov[selected, selected]
-    mahal_vec <- as.numeric(sub_invcov %*% weight_vec)
-    mahal_const <- sum(mahal_vec * weight_vec)
+  ### New projection method ########################
+  weight_stop_message <-"length(mean_weights) must either be equal to length(y) or sum(selected),
+  coordinates which were not selected are must have a weight of zero."
+  if(is.null(mean_weights)) {
+    mean_weights <- rep(1, sum(selected)) / sum(selected)
+  } else {
+    if(length(mean_weights) == length(y)) {
+      if(any(mean_weights[!selected] != 0)) {
+        stop(weight_stop_message)
+      }
+      mean_weights <- mean_weights[selected]
+    } else if(length(mean_weights) != sum(selected)) {
+      stop(weight_stop_message)
+    }
   }
-  ###
+
+  if(!is.null(projected)){
+    sub_invcov <- invcov[selected, selected]
+    mahal_vec <- as.numeric(sub_invcov %*% mean_weights)
+    mahal_const <- sum(mahal_vec * mean_weights)
+  }
+  ##########################################
 
   # Saving some samples
-  samples_for_init <- matrix(NA, nrow = floor((grad_iterations - assume_convergence) / 10), ncol = length(y))
+  samples_for_init <- matrix(NA, nrow = ceiling((grad_iterations - assume_convergence) / 10), ncol = length(y))
   init_mat_row <- 1
 
   if(progress) pb <- txtProgressBar(min = 0, max = grad_iterations, style = 3)
@@ -231,14 +239,11 @@ roiMLE <- function(y, cov, threshold,
     sampMat[, !selected] <- -sampMat[, !selected]
     samp <- colMeans(sampMat)
     if(i > assume_convergence & i %% 10 == 0) {
-      samples_for_init[init_mat_row, ] <- sampMat[nrow(sampMat), ]
+      # print(c(nrow(samples_for_init), init_mat_row))
+       samples_for_init[init_mat_row, ] <- sampMat[nrow(sampMat), ]
       init_mat_row <- init_mat_row + 1
     }
 
-    # Computing gradient ---------------
-    # if(i == assume_convergence) {
-    #   step_size_coef <- 0
-    # }
     condExp <- as.numeric(invcov %*% samp)
     if(regularization_param[1] > 0 & sum(selected) > 1) {
       firstGrad <- - as.numeric(firstDiff %*% mu[selected]) * regularization_param[1]
@@ -276,7 +281,7 @@ roiMLE <- function(y, cov, threshold,
     if(!is.null(projected)) {
       # gradient <- gradient * sqrt(vars)
       selected_gradient <- gradient[selected]
-      proj_adjust <- -sum(weight_vec * selected_gradient) / mahal_const * mahal_vec
+      proj_adjust <- -sum(mean_weights * selected_gradient) / mahal_const * mahal_vec
       gradient[selected] <- selected_gradient + proj_adjust
       # gradient <- gradient / sqrt(vars)
     }
@@ -319,14 +324,14 @@ roiMLE <- function(y, cov, threshold,
     if(progress) setTxtProgressBar(pb, i)
   }
   if(progress) close(pb)
+  samples_for_init <- samples_for_init[1:(init_mat_row - 1), ]
   #cat("\n")
 
   # Sampling from estimated mean --------
   sampmu <- colMeans(estimates[assume_convergence:grad_iterations, ])
-  nsamp <- sampling_params[1]
-  n_chains <- max(sampling_params[3], 1)
-  burnin <- max(0, sampling_params[2])
-  # browser()
+  nsamp <- sampling_control[["samp_per_chain"]]
+  n_chains <- sampling_control[["n_chains"]]
+  burnin <- sampling_control[["burnin"]]
   if(nsamp > 0) {
     sample_list <- vector(n_chains, mode = "list")
     if(n_chains > 1 & nrow(samples_for_init) > 1) {
@@ -362,16 +367,63 @@ roiMLE <- function(y, cov, threshold,
               conditional = conditional))
 }
 
+#' Generate a list of parameters for sampling from the estimated conditional distribution
+#'
+#' A function which generates a list of parameters for use in the roiMLE function,
+#' for sampling from the estimated distribution. This can be used for constructing
+#' confidence intervals or conducting hypothesis testing.
+#'
+#' @param samp_per_chain the number of samples to take from the estimated
+#' post-selection distribution in each MCMC chain. If 0, then no sampling
+#' will be conducted (default).
+#'
+#' @param burnin the burnin periods for each MCMC chain.
+#'
+#' @param n_chains the number of MCMC chains to run. The MCMC chains use
+#' different intializations. One chain will usually suffice, but it is
+#' recommended to run several if there is strong depedence in the data
+#' that may slow down the mixing of the MCMC chain.
+#'
 #' @export
-mle_control <- function(grad_iterations = 2100,
+roi_sampling_control <- function(samp_per_chain = 0,
+                             burnin = 1000,
+                             n_chains = 5) {
+  control <- list(samp_per_chain = samp_per_chain,
+                  burnin = burnin,
+                  n_chains = n_chains)
+  return(control)
+}
+
+#' Generate a list of parameters controllong the stochastic gradient process of the \code{roiMLE} function
+#'
+#' @param grad_iterations the number of stochastic gradient steps to take
+#'
+#' @param step_size_coef step size coefficients for stochastic gradient step.
+#' Best left unchanged.
+#'
+#' @param step_rate the rate at which the stochastic gradient steps size should
+#' decrease as a function of the number of steps already taken.
+#'
+#' @param samp_per_iter the number of slice MH samples to take for computing the
+#' stochastic gradient estimate in each stochastic gradient step
+#'
+#' @param grad_delay the number of iterations to wait before starting to decrease
+#' the stochastic gradient step size
+#'
+#' @param assume_convergence after how many gradient steps should we assume
+#' convergence? The final MLE estimate will be the average of the last
+#' \code{grad_iterations - assume_convergence} estimates
+#'
+#' @param impute_boundary the boundary imputation method to use. See
+#' description for details
+#'
+#' @export
+roi_mle_control <- function(grad_iterations = 2100,
                         step_size_coef = 0.5,
                         step_rate = 0.55,
                         samp_per_iter = 20,
                         grad_delay = NULL,
                         assume_convergence = NULL,
-                        sampling_params = c(samp_per_chain = 5000,
-                                            burnin = 1000,
-                                            n_chains = 10),
                         impute_boundary = c("smooth", "neighbors", "none", "mean")) {
   if(is.null(grad_delay)) {
     grad_delay <- main(ceiling(grad_iterations / 6), 100)
@@ -380,12 +432,11 @@ mle_control <- function(grad_iterations = 2100,
     assume_convergence <- floor(grad_iterations / 3)
   }
   control <- list(grad_iterations = grad_iterations,
-    bv ``               step_size_coef = step_size_coef,
+                  step_size_coef = step_size_coef,
                   step_rate = step_rate,
                   samp_per_iter = samp_per_iter,
                   grad_delay = grad_delay,
                   assume_convergence = assume_convergence,
-                  sampling_params = sampling_params,
                   impute_boundary = impute_boundary[1])
   return(control)
 }

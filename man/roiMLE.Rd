@@ -5,8 +5,10 @@
 \title{Compute the MLE for a selected region of interest}
 \usage{
 roiMLE(y, cov, threshold, coordinates = NULL, selected = NULL,
-  projected = NULL, regularization_param = NULL, regularization_slack = 1,
-  init = NULL, progress = FALSE, control = mle_control())
+  mean_weights = NULL, projected = NULL, regularization_param = NULL,
+  regularization_slack = 1, init = NULL, progress = FALSE,
+  sampling_control = roi_sampling_control(),
+  mle_control = roi_mle_control())
 }
 \arguments{
 \item{y}{the observed noraml coordinates}
@@ -23,6 +25,13 @@ or temporal observation}
 \item{selected}{an optional boolean vector, with \code{TRUE} coordinates
 corresponding to coordinates of \code{y} that were selected.}
 
+\item{mean_weights}{the weights to use for the contrast to be computed, if
+not specified then equal weights will be given to all selected coordinates.
+\code{mean_weights} do not have to sum to one. If specified, then the length
+of the vector must either equal \code{sum(selected)} (the number of selected
+coordinates), or \code{length(y)}. Either way, all coordinates which were not
+selected must be given a weight of zero.}
+
 \item{projected}{an optional fixed value that \code{mean(mu)} must equal.
 Can be used to construct profile likelihood post-selection confidence
 intervals.}
@@ -38,29 +47,14 @@ first order differences. The description for details}
 
 \item{init}{initial value for the mean estimate}
 
-\item{step_size_coef}{step size coefficients for stochastic gradient step.
-Best left unchanged.}
+\item{progress}{whether to display a bar describing the progress
+of the gradient algorithm.}
 
-\item{step_rate}{the rate at which the stochastic gradient steps size should
-decrease as a function of the number of steps already taken.}
+\item{sampling_control}{a list with control parameters for sampling
+from the estimated distribution.}
 
-\item{samp_per_iter}{the number of slice MH samples to take for computing the
-stochastic gradient estimate in each stochastic gradient step}
-
-\item{grad_delay}{the number of iterations to wait before starting to decrease
-the stochastic gradient step size}
-
-\item{grad_iterations}{the number of stochastic gradient steps to take}
-
-\item{assume_convergence}{after how many gradient steps should we assume
-convergence? The final MLE estimate will be the average of the last
-\code{grad_iterations - assume_convergence} estimates}
-
-\item{nsamp}{the number of samples to take from the estimated
-post-selection distribution}
-
-\item{impute_boundary}{the boundary imputation method to use. See
-description for details}
+\item{mle_contorl}{a list of parameters to be used when computed the
+conditional MLE.}
 }
 \description{
 Computes the conditional mle for a region selected based on
