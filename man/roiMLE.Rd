@@ -4,7 +4,8 @@
 \alias{roiMLE}
 \title{Compute the MLE for a selected region of interest}
 \usage{
-roiMLE(y, cov, threshold, coordinates = NULL, selected = NULL,
+roiMLE(y, cov, threshold, compute = c("mle", "lower-CI", "upper-CI"),
+  ci_alpha = 0.025, coordinates = NULL, selected = NULL,
   mean_weights = NULL, projected = NULL, regularization_param = NULL,
   regularization_slack = 1, init = NULL, progress = FALSE,
   sampling_control = roi_sampling_control(),

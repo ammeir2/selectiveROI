@@ -54,6 +54,8 @@
 #' @import progress
 #' @export
 roiMLE <- function(y, cov, threshold,
+                   compute = c("mle", "lower-CI", "upper-CI"),
+                   ci_alpha = 0.025,
                    coordinates = NULL,
                    selected = NULL,
                    mean_weights = NULL,
@@ -212,7 +214,8 @@ roiMLE <- function(y, cov, threshold,
     }
   }
 
-  if(!is.null(projected)){
+  compute <- compute[1]
+  if(!is.null(projected) | compute != "mle"){
     sub_invcov <- invcov[selected, selected]
     mahal_vec <- as.numeric(sub_invcov %*% mean_weights)
     mahal_const <- sum(mahal_vec * mean_weights)
@@ -223,8 +226,80 @@ roiMLE <- function(y, cov, threshold,
   samples_for_init <- matrix(NA, nrow = ceiling((grad_iterations - assume_convergence) / 10), ncol = length(y))
   init_mat_row <- 1
 
+  # What are we computing? ---------
+  if(compute %in% c("lower-CI", "upper-CI")) {
+    mean_sd <- as.numeric(t(mean_weights) %*% cov[selected, selected] %*% mean_weights)
+    obs_mean <- sum(y[selected] * mean_weights)
+    RB_const <- 2 / dnorm(2 * ci_alpha, sd = mean_sd)
+  }
+
+  if(compute == "lower-CI") { # Initializing from a conservative limit
+    if(obs_mean > 0) {
+      ci_lim <- obs_mean - qnorm(1 - ci_alpha / 2, sd = mean_sd)
+      regularization_slack <- abs(ci_lim) / abs(obs_mean)
+      mu <- project_vector_mahalanobis(y, ci_lim, selected, mean_weights,
+                                       mahal_const, mahal_vec)
+    } else {
+      ci_lim <- obs_mean - qnorm(1 - ci_alpha, sd = mean_sd)
+      regularization_slack <- abs(ci_lim) / abs(obs_mean)
+      mu <- project_vector_mahalanobis(y, ci_lim, selected, mean_weights,
+                                       mahal_const, mahal_vec)
+    }
+    ci_lim_path <- numeric(grad_iterations - 1)
+    samp_means <- numeric(grad_iterations - 2)
+    ci_lim_path[1] <- ci_lim
+  } else if(compute == "upper-CI") {
+    if(obs_mean < 0 & FALSE) {
+      ci_lim <- obs_mean + qnorm(1 - ci_alpha / 2, sd = mean_sd)
+      regularization_slack <- abs(ci_lim) / abs(obs_mean)
+      mu <- project_vector_mahalanobis(y, ci_lim, selected, mean_weights,
+                                       mahal_const, mahal_vec)
+    } else {
+      ci_lim <- obs_mean + qnorm(1 - ci_alpha, sd = mean_sd)
+      regularization_slack <- abs(ci_lim) / abs(obs_mean)
+      mu <- project_vector_mahalanobis(y, ci_lim, selected, mean_weights,
+                                       mahal_const, mahal_vec)
+    }
+    ci_lim_path <- numeric(grad_iterations - 1)
+    samp_means <- numeric(grad_iterations - 2)
+    ci_lim_path[1] <- ci_lim
+  } else if(compute != "mle") {
+    stop("compute must be either, lower-CI, upper-CI, or mle")
+  } else {
+    ci_lim_path <- NULL
+  }
+
   if(progress) pb <- txtProgressBar(min = 0, max = grad_iterations, style = 3)
   for(i in 2:grad_iterations) {
+    # Projecting to new CI limit
+    if(i > 2 & compute != "mle") {
+      step_lim <- 0.05
+      if(compute == "lower-CI") {
+        mult_const <- RB_const * (obs_mean - ci_lim)
+        if(samp_mean < obs_mean) {
+          ci_lim <- ci_lim + min(mult_const * ci_alpha / sqrt(i - 2), step_lim * mean_sd)
+        } else {
+          ci_lim <- ci_lim - min(mult_const * (1 - ci_alpha) / sqrt(i - 2), step_lim * mean_sd)
+        }
+        regularization_slack <- min(abs(ci_lim) / abs(obs_mean), abs(obs_mean - mean_sd * qnorm(1 - ci_alpha)) / abs(obs_mean))
+      } else if(compute == "upper-CI") {
+        mult_const <- RB_const * (ci_lim - obs_mean)
+        if(samp_mean > obs_mean) {
+          ci_lim <- ci_lim - min(mult_const * ci_alpha / (i - 2), step_lim * mean_sd)
+          # ci_lim <- ci_lim - min(mult_const * (1 - ci_alpha) / (i - 2), step_lim * mean_sd)
+        } else {
+          ci_lim <- ci_lim + min(mult_const * (1 - ci_alpha) / (i - 2), step_lim * mean_sd)
+          # ci_lim <- ci_lim + min(mult_const * (ci_alpha) / (i - 2), step_lim * mean_sd)
+        }
+        regularization_slack <- min(abs(ci_lim) / abs(obs_mean), abs(obs_mean + mean_sd * qnorm(1 - ci_alpha)) / abs(obs_mean))
+      }
+      ci_lim_path[i - 1] <- ci_lim
+      samp_means[i - 2] <- samp_mean
+      mu <- project_vector_mahalanobis(mu, ci_lim, selected, mean_weights,
+                                       mahal_const, mahal_vec)
+      # print(c(i = i, obs_mean = obs_mean, samp_mean = samp_mean, ci_lim = ci_lim, mean(samp_means[max(1, i - 500):(i-2)] < obs_mean)))
+    }
+
     # SLICE SAMPLING!
     sampInit <- currentSamp
     sampInit[!selected] <- -sampInit[!selected]
@@ -238,6 +313,10 @@ roiMLE <- function(y, cov, threshold,
     sampMat <- t(t(sampMat) + sampmu)
     sampMat[, !selected] <- -sampMat[, !selected]
     samp <- colMeans(sampMat)
+    if(compute != "mle") {
+      samp_mean <- sum(sampMat[nrow(sampMat), selected] * mean_weights)
+    }
+
     if(i > assume_convergence & i %% 10 == 0) {
       # print(c(nrow(samples_for_init), init_mat_row))
        samples_for_init[init_mat_row, ] <- sampMat[nrow(sampMat), ]
@@ -278,12 +357,9 @@ roiMLE <- function(y, cov, threshold,
     gradient[!selected] <- 0
     gradsign <- sign(gradient)
     gradient <- pmin(abs(gradient), 0.1 * sqrt(vars)) * gradsign
-    if(!is.null(projected)) {
-      # gradient <- gradient * sqrt(vars)
-      selected_gradient <- gradient[selected]
-      proj_adjust <- -sum(mean_weights * selected_gradient) / mahal_const * mahal_vec
-      gradient[selected] <- selected_gradient + proj_adjust
-      # gradient <- gradient / sqrt(vars)
+    if(!is.null(projected) | compute != "mle") {
+      gradient <- project_vector_mahalanobis(gradient, 0, selected, mean_weights,
+                                             mahal_const, mahal_vec)
     }
 
     # Updating estimate. The error thing is to make sure we didn't accidently
@@ -297,11 +373,14 @@ roiMLE <- function(y, cov, threshold,
       } else if(impute_boundary == "neighbors") {
         mu[neighbors[, 1]] <- mu[neighbors[, 2]] * abs(y[neighbors[, 1]] / y[neighbors[, 2]])
       } else if(impute_boundary == "smooth") {
-        mu[!selected] <- smooth_weights %*% mu[selected]
+        if(i == 2) {
+          neighbor_ratio <- as.numeric(abs(y[!selected]) / abs(smooth_weights %*% y[selected]))
+        }
+        mu[!selected] <- smooth_weights %*% mu[selected] * neighbor_ratio
       }
     }
 
-    if(is.null(projected)) {
+    if(compute == "mle" & is.null(projected)) {
       mu <- pmax(0, mu * sign(y)) * sign(y)
       mu <- pmin(abs(mu), abs(y)) * sign(y)
     }
@@ -310,7 +389,8 @@ roiMLE <- function(y, cov, threshold,
     if(i > assume_convergence / 3 &
        !slackAdjusted &
        is.null(projected) &
-       sum(selected) > 1) {
+       sum(selected) > 1 &
+       compute == "mle") {
       regularization_slack <- pmax(regularization_slack * mean(mu[selected]) / obsmean, 10^-3)
       slackAdjusted <- TRUE
     }
@@ -364,7 +444,8 @@ roiMLE <- function(y, cov, threshold,
   conditional <- colMeans(estimates[assume_convergence:grad_iterations, ])
   return(list(sample = outSamples,
               estimates = estimates,
-              conditional = conditional))
+              conditional = conditional,
+              ci_lim_path = ci_lim_path))
 }
 
 #' Generate a list of parameters for sampling from the estimated conditional distribution
@@ -540,5 +621,13 @@ adjustTykohonov <- function(obsDiff, obsmean, mu, selected,
   }
 
   return(regularization_param)
+}
+
+project_vector_mahalanobis <- function(x, target, selected, mean_weights,
+                                       mahal_const, mahal_vec) {
+  selected_x <- x[selected]
+  proj_adjust <- (target - sum(mean_weights * selected_x)) / mahal_const * mahal_vec
+  x[selected] <- selected_x + proj_adjust
+  return(x)
 }
 
