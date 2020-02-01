@@ -6,3 +6,6 @@ coverage is computed.
 005 -- more tuning, changing samples per iteration
 006 -- experiments with running multiple MC chains when sampling at profile likelihood estimate
 007 -- experiments using updated API, with power estimation.
+008 -- experiments with Robins-Monroe CI computation routine
+009 -- like 008, varying the number of iterations
+010 -- like 009, varying some parameters to see if coverage rate can be improved without major software changes.

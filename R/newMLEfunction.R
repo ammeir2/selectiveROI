@@ -54,6 +54,8 @@
 #' @import progress
 #' @export
 roiMLE <- function(y, cov, threshold,
+                   compute = c("mle", "lower-CI", "upper-CI"),
+                   ci_alpha = 0.025,
                    coordinates = NULL,
                    selected = NULL,
                    mean_weights = NULL,
@@ -88,7 +90,7 @@ roiMLE <- function(y, cov, threshold,
   if(length(impute_boundary) > 1) impute_boundary <- impute_boundary[1]
   if(impute_boundary == "neighbors") {
     if(is.null(coordinates)) {
-      impute_boundary <- "mean"
+      stop("Must specify coordinates for impute_boundary == 'neighbors'")
     } else {
       unselected <- which(!selected)
       distances <- as.matrix(dist(coordinates))
@@ -113,9 +115,10 @@ roiMLE <- function(y, cov, threshold,
   if(is.infinite(regularization_slack) | sum(selected) <= 1) {
     regularization_param <- rep(0, 2)
   } else if(is.null(regularization_param)) {
+    message("regularization parameters not specified, defaulting to 0,1")
     regularization_param <- c(1, 0)
   } else if(any(regularization_param < 0)) {
-    regularization_param <- c(1, 0)
+    stop("Regularization parameters must be positive")
   } else if(is.null(coordinates)) {
     regularization_slack <- 2
     regularization_param <- c(1, 0)
@@ -134,7 +137,9 @@ roiMLE <- function(y, cov, threshold,
   }
 
   if(!is.null(init)) {
-    if(length(init) != length(y)) stop("If init is not NULL, then its length must match the length of y.")
+    if(length(init) != length(y)) {
+      stop("If init is not NULL, then its length must match the length of y.")
+    }
     mu <- init
   } else {
     mu <- y
@@ -142,7 +147,7 @@ roiMLE <- function(y, cov, threshold,
   }
 
   sds <- sqrt(diag(cov))
-  vars <- sds^2
+  vars <- diag(cov)
   invcov <- solve(cov)
   condSigma <- 1 / diag(invcov)
   suffStat <- as.numeric(invcov %*% y)
@@ -155,9 +160,9 @@ roiMLE <- function(y, cov, threshold,
   # If a projected gradient method is used then initalization must be from
   # a parameter which satisfies the constraint.
   if(!is.null(projected)) {
-    mu <- mu * sqrt(vars)
+    #mu <- mu * sqrt(vars)
     mu[selected] <- rep(projected, sum(selected))
-    mu <- mu / sqrt(vars)
+    #mu <- mu / sqrt(vars)
   }
 
   estimates <- matrix(nrow = grad_iterations, ncol = p)
@@ -212,7 +217,8 @@ roiMLE <- function(y, cov, threshold,
     }
   }
 
-  if(!is.null(projected)){
+  compute <- compute[1]
+  if(!is.null(projected) | compute != "mle") {
     sub_invcov <- invcov[selected, selected]
     mahal_vec <- as.numeric(sub_invcov %*% mean_weights)
     mahal_const <- sum(mahal_vec * mean_weights)
@@ -223,8 +229,73 @@ roiMLE <- function(y, cov, threshold,
   samples_for_init <- matrix(NA, nrow = ceiling((grad_iterations - assume_convergence) / 10), ncol = length(y))
   init_mat_row <- 1
 
+  # What are we computing? ---------
+  if(compute %in% c("lower-CI", "upper-CI")) {
+    mean_sd <- as.numeric(t(mean_weights) %*% cov[selected, selected] %*% mean_weights)
+    obs_mean <- sum(y[selected] * mean_weights)
+    RB_const <- 2 / dnorm(2 * ci_alpha, sd = mean_sd)
+  }
+
+  if(compute == "lower-CI") { # Initializing from a conservative limit
+    if(obs_mean > 0) {
+      ci_lim_level = ci_alpha^2
+    } else
+      ci_lim_level = ci_alpha
+    }
+    ci_lim <- obs_mean - qnorm(1 - ci_lim_level, sd = mean_sd)
+    regularization_slack <- abs(ci_lim) / abs(obs_mean)
+    mu <- project_vector_mahalanobis(y, ci_lim, selected, mean_weights,
+                                     mahal_const, mahal_vec)
+    ci_lim_path <- numeric(grad_iterations - 1)
+    samp_means <- numeric(grad_iterations - 2)
+    ci_lim_path[1] <- ci_lim
+  } else if(compute == "upper-CI") {
+    if(obs_mean < 0) {
+      ci_lim_level = ci_alpha^2
+    } else {
+      ci_lim_level = ci_alpha
+    }
+    ci_lim <- obs_mean + qnorm(1 - ci_alpha^2, sd = mean_sd)
+    regularization_slack <- abs(ci_lim) / abs(obs_mean)
+    mu <- project_vector_mahalanobis(y, ci_lim, selected, mean_weights,
+                                     mahal_const, mahal_vec)
+    ci_lim_path <- numeric(grad_iterations - 1)
+    samp_means <- numeric(grad_iterations - 2)
+    ci_lim_path[1] <- ci_lim
+  } else if(compute != "mle") {
+    stop("compute must be either, lower-CI, upper-CI, or mle")
+  } else {
+    ci_lim_path <- NULL
+  }
+
   if(progress) pb <- txtProgressBar(min = 0, max = grad_iterations, style = 3)
   for(i in 2:grad_iterations) {
+    # Projecting to new CI limit
+    if(i > 2 & compute != "mle") {
+      step_lim <- 0.05
+      if(compute == "lower-CI") {
+        mult_const <- RB_const * (obs_mean - ci_lim)
+        if(samp_mean < obs_mean) {
+          ci_lim <- ci_lim + min(mult_const * ci_alpha / sqrt(i - 2), step_lim * mean_sd)
+        } else {
+          ci_lim <- ci_lim - min(mult_const * (1 - ci_alpha) / sqrt(i - 2), step_lim * mean_sd)
+        }
+        regularization_slack <- min(abs(ci_lim) / abs(obs_mean), abs(obs_mean - mean_sd * qnorm(1 - ci_alpha)) / abs(obs_mean))
+      } else if(compute == "upper-CI") {
+        mult_const <- RB_const * (ci_lim - obs_mean)
+        if(samp_mean > obs_mean) {
+          ci_lim <- ci_lim - min(mult_const * ci_alpha / (i - 2), step_lim * mean_sd)
+        } else {
+          ci_lim <- ci_lim + min(mult_const * (1 - ci_alpha) / (i - 2), step_lim * mean_sd)
+        }
+        regularization_slack <- min(abs(ci_lim) / abs(obs_mean), abs(obs_mean + mean_sd * qnorm(1 - ci_alpha)) / abs(obs_mean))
+      }
+      ci_lim_path[i - 1] <- ci_lim
+      samp_means[i - 2] <- samp_mean
+      mu <- project_vector_mahalanobis(mu, ci_lim, selected, mean_weights,
+                                       mahal_const, mahal_vec)
+    }
+
     # SLICE SAMPLING!
     sampInit <- currentSamp
     sampInit[!selected] <- -sampInit[!selected]
@@ -238,6 +309,10 @@ roiMLE <- function(y, cov, threshold,
     sampMat <- t(t(sampMat) + sampmu)
     sampMat[, !selected] <- -sampMat[, !selected]
     samp <- colMeans(sampMat)
+    if(compute != "mle") {
+      samp_mean <- sum(sampMat[nrow(sampMat), selected] * mean_weights)
+    }
+
     if(i > assume_convergence & i %% 10 == 0) {
       # print(c(nrow(samples_for_init), init_mat_row))
        samples_for_init[init_mat_row, ] <- sampMat[nrow(sampMat), ]
@@ -278,12 +353,9 @@ roiMLE <- function(y, cov, threshold,
     gradient[!selected] <- 0
     gradsign <- sign(gradient)
     gradient <- pmin(abs(gradient), 0.1 * sqrt(vars)) * gradsign
-    if(!is.null(projected)) {
-      # gradient <- gradient * sqrt(vars)
-      selected_gradient <- gradient[selected]
-      proj_adjust <- -sum(mean_weights * selected_gradient) / mahal_const * mahal_vec
-      gradient[selected] <- selected_gradient + proj_adjust
-      # gradient <- gradient / sqrt(vars)
+    if(!is.null(projected) | compute != "mle") {
+      gradient <- project_vector_mahalanobis(gradient, 0, selected, mean_weights,
+                                             mahal_const, mahal_vec)
     }
 
     # Updating estimate. The error thing is to make sure we didn't accidently
@@ -297,11 +369,14 @@ roiMLE <- function(y, cov, threshold,
       } else if(impute_boundary == "neighbors") {
         mu[neighbors[, 1]] <- mu[neighbors[, 2]] * abs(y[neighbors[, 1]] / y[neighbors[, 2]])
       } else if(impute_boundary == "smooth") {
-        mu[!selected] <- smooth_weights %*% mu[selected]
+        if(i == 2) {
+          neighbor_ratio <- as.numeric(abs(y[!selected]) / abs(smooth_weights %*% y[selected]))
+        }
+        mu[!selected] <- smooth_weights %*% mu[selected] * neighbor_ratio
       }
     }
 
-    if(is.null(projected)) {
+    if(compute == "mle" & is.null(projected)) {
       mu <- pmax(0, mu * sign(y)) * sign(y)
       mu <- pmin(abs(mu), abs(y)) * sign(y)
     }
@@ -310,7 +385,8 @@ roiMLE <- function(y, cov, threshold,
     if(i > assume_convergence / 3 &
        !slackAdjusted &
        is.null(projected) &
-       sum(selected) > 1) {
+       sum(selected) > 1 &
+       compute == "mle") {
       regularization_slack <- pmax(regularization_slack * mean(mu[selected]) / obsmean, 10^-3)
       slackAdjusted <- TRUE
     }
@@ -364,7 +440,8 @@ roiMLE <- function(y, cov, threshold,
   conditional <- colMeans(estimates[assume_convergence:grad_iterations, ])
   return(list(sample = outSamples,
               estimates = estimates,
-              conditional = conditional))
+              conditional = conditional,
+              ci_lim_path = ci_lim_path))
 }
 
 #' Generate a list of parameters for sampling from the estimated conditional distribution
@@ -417,6 +494,9 @@ roi_sampling_control <- function(samp_per_chain = 0,
 #' @param impute_boundary the boundary imputation method to use. See
 #' description for details
 #'
+#' @param RB_mult adjusts the Robins-Monroe step sizes when computing
+#' profile-likelihood confidence intervals.
+#'
 #' @export
 roi_mle_control <- function(grad_iterations = 2100,
                         step_size_coef = 0.5,
@@ -424,7 +504,8 @@ roi_mle_control <- function(grad_iterations = 2100,
                         samp_per_iter = 20,
                         grad_delay = NULL,
                         assume_convergence = NULL,
-                        impute_boundary = c("smooth", "neighbors", "none", "mean")) {
+                        impute_boundary = c("smooth", "neighbors", "none", "mean"),
+                        RB_mult = 1) {
   if(is.null(grad_delay)) {
     grad_delay <- main(ceiling(grad_iterations / 6), 100)
   }
@@ -437,7 +518,8 @@ roi_mle_control <- function(grad_iterations = 2100,
                   samp_per_iter = samp_per_iter,
                   grad_delay = grad_delay,
                   assume_convergence = assume_convergence,
-                  impute_boundary = impute_boundary[1])
+                  impute_boundary = impute_boundary[1],
+                  RB_mult = RB_mult)
   return(control)
 }
 
@@ -503,7 +585,7 @@ computeTykohonov <- function(selected, coordinates) {
   return(list(firstDiff = firstDiff, secondDiff = secondDiff))
 }
 
-# Adjusts tykohonov parametere
+#' Adjusts tykohonov parameter
 adjustTykohonov <- function(obsDiff, obsmean, mu, selected,
                             firstDiff, secondDiff,
                             tykohonvSlack, regularization_param) {
@@ -540,5 +622,23 @@ adjustTykohonov <- function(obsDiff, obsmean, mu, selected,
   }
 
   return(regularization_param)
+}
+
+#' A function for projecting a vector such that it will satisfy a linear constraint
+#' based on a mahalanobis metric
+#'
+#' @param x the vector to be projected
+#' @param target what the linear function of x should equal after the projection
+#' @param selected which coordinates of x were selected
+#' @param mean_weights we require that \code{sum(x * mean_weights)} will equal \code{target}
+#' @param mahal_const Let \code{A} be a matrix such that our mahalanobis metric is \code{t(x) %*% A %*% x}.
+#' Then \code{mahal_const} is \code{t(mean_weights) %*% A %*% mean_weights}
+#' @param mahal_vec \code{A %*% mean_weights}
+project_vector_mahalanobis <- function(x, target, selected, mean_weights,
+                                       mahal_const, mahal_vec) {
+  selected_x <- x[selected]
+  proj_adjust <- (target - sum(mean_weights * selected_x)) / mahal_const * mahal_vec
+  x[selected] <- selected_x + proj_adjust
+  return(x)
 }
 

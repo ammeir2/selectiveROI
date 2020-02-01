@@ -12,3 +12,5 @@ fmridata/*
 simulations/*/results
 simulations/*/errors
 simulations/*/figures
+simulations/*/results.zip
+simulations/.swp
