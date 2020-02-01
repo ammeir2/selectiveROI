@@ -180,12 +180,13 @@ configurations_A <- expand.grid(imputation_method = c("smooth"),
                                 samp_per_iter = c(50))
 configurations <- configurations_A
 configurations$dims <- factor(configurations$dims, levels = c("1D", "2D"))
-registerDoParallel(2)
+registerDoParallel(1)
 sim_path <- "simulations/007"
 have_results <- dir(sprintf("%s/results", sim_path)) %>% strsplit("_") %>%
   sapply(function(x) x[[2]]) %>% as.numeric()
+# have_results = c()
 to_run <- setdiff(1:nrow(configurations), have_results)
-foreach(i = to_run) %dopar% {
+foreach(i = to_run) %do% {
   log_file <- sprintf("%s/errors/iter_%s_%s_log.txt", sim_path, i, "A")
   error_file <- sprintf("%s/errors/iter_%s_%s_error.txt", sim_path, i, "A")
   sink(log_file)

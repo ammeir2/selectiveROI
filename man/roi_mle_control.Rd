@@ -7,7 +7,7 @@
 roi_mle_control(grad_iterations = 2100, step_size_coef = 0.5,
   step_rate = 0.55, samp_per_iter = 20, grad_delay = NULL,
   assume_convergence = NULL, impute_boundary = c("smooth", "neighbors",
-  "none", "mean"))
+  "none", "mean"), RB_mult = 1)
 }
 \arguments{
 \item{grad_iterations}{the number of stochastic gradient steps to take}
@@ -30,6 +30,9 @@ convergence? The final MLE estimate will be the average of the last
 
 \item{impute_boundary}{the boundary imputation method to use. See
 description for details}
+
+\item{RB_mult}{adjusts the Robins-Monroe step sizes when computing
+profile-likelihood confidence intervals.}
 }
 \description{
 Generate a list of parameters controllong the stochastic gradient process of the \code{roiMLE} function

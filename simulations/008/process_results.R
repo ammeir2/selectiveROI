@@ -2,7 +2,7 @@ library(data.table)
 library(ggplot2)
 library(magrittr)
 
-sim_results_dir <- "simulations/006/results"
+sim_results_dir <- "simulations/008/results"
 files <- dir(sim_results_dir)
 files <- paste(sim_results_dir, "/", files, sep = "")
 param_list <- vector(length(files), mode = "list")
@@ -26,72 +26,82 @@ parameters <- rbindlist(param_list)
 results <- merge(parameters, results, by = "sim_id")
 results[, seed := NULL]
 
-# Estimation error ----------------
-est_cols <- setdiff(names(results), c("samp_size", "tyk_exp", "min_size", "distance_threshold",
-                                      "q025.2.5%", "q975.97.5%", "covered.2.5%", "naive_cover",
-                                      "imp_cover.2.5%", "size", "n_chains"))
-estimation_error <- results[n_chains == 1, .SD, .SDcols = est_cols]
-estimation_error <- melt(estimation_error,
-                         id.vars = setdiff(est_cols, c("obs_mean", "mle")),
-                         value.name = "estimate", variable.name = "method")
-estimation_error <- estimation_error[, .(rmse = sqrt(mean((estimate - true_mean)^2)),
-                                         wrmse = sqrt(weighted.mean((estimate - true_mean)^2,
-                                                                    w = n_selected))),
-                                     by = .(sim_id, imputation_method, grad_step_rate, grad_step_size,
-                                            grad_iterations, threshold, mu_sd, noise_sd,
-                                            bandwidth_sd, rho, dims, method, samp_per_iter)]
-estimation_error <- melt(estimation_error,
-                         id.vars = setdiff(names(estimation_error), c("rmse", "wrmse")),
-                         variable.name = "error_type", value.name = "error")
-estimation_error <- estimation_error[, .(mean_error = mean(error), sd_error = sd(error) / sqrt(.N)),
-                                     by = .(imputation_method, grad_step_rate, grad_step_size,
-                                            grad_iterations, threshold, mu_sd, noise_sd,
-                                            bandwidth_sd, rho, dims, method, error_type, samp_per_iter)]
-estimation_error[, tune := sprintf("rate%s_samps%s",
-                                   grad_step_rate, samp_per_iter)]
-ggplot(estimation_error, aes(x = mu_sd, y = mean_error, col = tune, linetype = method)) +
-  facet_grid(dims + error_type ~ rho + bandwidth_sd + threshold, scales = "free", labeller = "label_both") +
-  theme_bw() +  geom_line()
-ggsave("simulations/006/figures/estimation_error.pdf")
-
-rankings <- estimation_error[order(dims, mu_sd, threshold, bandwidth_sd, rho, method, mean_error)][error_type == "rmse" & method == "mle"]
-rankings <- rankings[, .(best = tune[1], worst = tune[.N]),
-                     by = .(threshold, mu_sd, noise_sd, bandwidth_sd, rho, dims)]
-rankings[order(best)]
-
 # Coverage rate -------------
-setnames(results, c("covered.2.5%", "naive_cover", "imp_cover.2.5%"), c("profile", "naive", "union"))
-cover_cols <- setdiff(names(results), c("imputation_method", "min_size", "size", "true_mean",
-                                        "obs_mean", "mle", "q025.2.5%", "q975.97.5%"))
+cover_cols <- c("sim_id", "mu_sd", "bandwidth_sd", "threshold", "rho", "n_selected", "naive_cover", "profile_cover", "dims")
 coverage_rate <- results[, .SD, .SDcols = cover_cols]
-coverage_rate <- melt(coverage_rate, id.vars = setdiff(cover_cols, c("profile", "naive", "union")),
+coverage_rate <- melt(coverage_rate, id.vars = setdiff(cover_cols, c("profile_cover", "naive_cover")),
                       variable.name = "ci_method", value.name = "coverage")
 coverage_rate <- coverage_rate[, .(cover = mean(coverage),
                                    wcover = weighted.mean(coverage, n_selected)),
-                         by = .(sim_id, grad_step_size, grad_step_rate, grad_iterations, samp_size, tyk_exp,
-                                threshold, mu_sd, bandwidth_sd, rho, dims, ci_method, samp_per_iter,
-                                n_chains, burnin)]
+                         by = .(sim_id, mu_sd, bandwidth_sd, threshold, rho, ci_method, dims)]
 coverage_rate <- coverage_rate[, .(cover = mean(cover), coverSD = sd(cover) / sqrt(.N),
                                    wcover = mean(wcover), wcoverSD = sd(wcover) / sqrt(.N)),
-                               by = .(grad_step_size, grad_step_rate, grad_iterations, samp_size, tyk_exp,
-                                      threshold, mu_sd, bandwidth_sd, rho, dims, ci_method, samp_per_iter,
-                                      n_chains, burnin)]
-# coverage_rate <- melt(coverage_rate,
-#                       id.vars = setdiff(names(coverage_rate), c("cover", "wcover")),
-#                       variable.name = "measure", value.name = "coverage")
-coverage_rate[, tune := sprintf("rate%s_gardsamps%s_burnin%s_nchains%s",
-                                grad_step_rate, samp_per_iter, burnin, n_chains)]
-coverage_rate[, coverage := cover]
-coverage_rate[, coverageSD := coverSD]
-ggplot(coverage_rate[ci_method == "profile" & burnin == 1000],
-       aes(x = mu_sd, y = coverage, col = tune, linetype = tune)) +
+                               by = .(mu_sd, bandwidth_sd, threshold, rho, ci_method, dims)]
+coverage_rate <- rbind(coverage_rate[, .(mu_sd, bandwidth_sd, threshold, rho, ci_method, dims, cover = cover, coverSD = coverSD, avg = "simple")],
+                       coverage_rate[, .(mu_sd, bandwidth_sd, threshold, rho, ci_method, dims, cover = wcover, coverSD = wcoverSD, avg = "weighted")])
+ci_quant <- qnorm(1 - 0.05 / nrow(coverage_rate))
+ggplot(coverage_rate[ci_method == "profile_cover"],
+       aes(x = mu_sd, y = cover, col = ci_method, linetype = avg)) +
   geom_line() +
   theme_bw() +
   facet_grid(dims + threshold ~ rho + bandwidth_sd, scales = "free", labeller = "label_both") +
   geom_hline(yintercept = 0.95) +
-  geom_segment(aes(xend = mu_sd, y = coverage - 2 * coverageSD,
-                   yend = coverage + 2 * coverageSD))
-ggsave("simulations/006/figures/ci_coverage_rate.pdf")
+  geom_segment(aes(xend = mu_sd, y = cover - ci_quant * coverSD,
+                   yend = cover + ci_quant * coverSD))
+ggsave("simulations/008/figures/ci_coverage_rate.pdf")
+
+# What are our misses? ------------------
+misses <- results[, .(sim_id, mu_sd, bandwidth_sd, threshold, rho, dims, true_mean,
+                      upper = abs(true_mean) > profile_uci * sign(true_mean) & !profile_cover,
+                      lower = abs(true_mean) < profile_uci * sign(true_mean) & !profile_cover,
+                      overall = 1 - profile_cover)]
+misses <- misses[, .(upper = mean(upper),
+                     lower = mean(lower),
+                     overall = mean(overall)),
+                 by = .(sim_id, mu_sd, bandwidth_sd, threshold, rho, dims)]
+misses <- misses[, .(upper = mean(upper),
+                     lower = mean(lower),
+                     overall = mean(overall)),
+                 by = .(mu_sd, bandwidth_sd, threshold, rho, dims)]
+misses <- melt(misses, id.vars = setdiff(names(misses), c("lower", "upper", "overall")),
+               variable.name = "direction",
+               value.name = "percentage")
+ggplot(misses, aes(x = mu_sd, y = percentage, col = direction, linetype = direction)) +
+  facet_grid(dims + threshold ~ rho + bandwidth_sd, scales = "free", labeller = "label_both") +
+  theme_bw() +
+  geom_line() +
+  geom_hline(yintercept = 0.05) +
+  geom_hline(yintercept = 0.025, linetype = 2)
+
+# Power ---------
+power <- results[, .(sim_id, mu_sd, bandwidth_sd, threshold, rho, dims,
+                     naive_power = 0 < naive_lci | 0 > naive_uci,
+                     profile_power = 0 < profile_lci | 0 > profile_uci)]
+power <- power[, .(naive_power = mean(naive_power),
+                   profile_power = mean(profile_power)),
+               by = .(sim_id, mu_sd, bandwidth_sd, threshold, rho, dims)]
+power <- power[, .(naive_power = mean(naive_power),
+                   profile_power = mean(profile_power)),
+               by = .(mu_sd, bandwidth_sd, threshold, rho, dims)]
+power <- melt(power, id.vars = setdiff(names(power), c("naive_power", "profile_power")),
+              variable.name = "method", value.name = "power")
+ggplot(power, aes(x = mu_sd, y = power, linetype = method, col = method)) +
+  geom_line() +
+  theme_bw() +
+  facet_grid(dims + threshold ~ rho + bandwidth_sd, scales = "free", labeller = "label_both") +
+  ylim(0, 1)
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

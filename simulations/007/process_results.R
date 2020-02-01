@@ -2,7 +2,7 @@ library(data.table)
 library(ggplot2)
 library(magrittr)
 
-sim_results_dir <- "simulations/006/results"
+sim_results_dir <- "simulations/007/results"
 files <- dir(sim_results_dir)
 files <- paste(sim_results_dir, "/", files, sep = "")
 param_list <- vector(length(files), mode = "list")
@@ -30,7 +30,7 @@ results[, seed := NULL]
 est_cols <- setdiff(names(results), c("samp_size", "tyk_exp", "min_size", "distance_threshold",
                                       "q025.2.5%", "q975.97.5%", "covered.2.5%", "naive_cover",
                                       "imp_cover.2.5%", "size", "n_chains"))
-estimation_error <- results[n_chains == 1, .SD, .SDcols = est_cols]
+estimation_error <- results[, .SD, .SDcols = est_cols]
 estimation_error <- melt(estimation_error,
                          id.vars = setdiff(est_cols, c("obs_mean", "mle")),
                          value.name = "estimate", variable.name = "method")
@@ -47,17 +47,10 @@ estimation_error <- estimation_error[, .(mean_error = mean(error), sd_error = sd
                                      by = .(imputation_method, grad_step_rate, grad_step_size,
                                             grad_iterations, threshold, mu_sd, noise_sd,
                                             bandwidth_sd, rho, dims, method, error_type, samp_per_iter)]
-estimation_error[, tune := sprintf("rate%s_samps%s",
-                                   grad_step_rate, samp_per_iter)]
-ggplot(estimation_error, aes(x = mu_sd, y = mean_error, col = tune, linetype = method)) +
-  facet_grid(dims + error_type ~ rho + bandwidth_sd + threshold, scales = "free", labeller = "label_both") +
+ggplot(estimation_error, aes(x = mu_sd, y = mean_error, col = method, linetype = error_type)) +
+  facet_grid(dims + threshold ~ rho + bandwidth_sd, scales = "free", labeller = "label_both") +
   theme_bw() +  geom_line()
-ggsave("simulations/006/figures/estimation_error.pdf")
-
-rankings <- estimation_error[order(dims, mu_sd, threshold, bandwidth_sd, rho, method, mean_error)][error_type == "rmse" & method == "mle"]
-rankings <- rankings[, .(best = tune[1], worst = tune[.N]),
-                     by = .(threshold, mu_sd, noise_sd, bandwidth_sd, rho, dims)]
-rankings[order(best)]
+ggsave("simulations/007/figures/estimation_error.pdf")
 
 # Coverage rate -------------
 setnames(results, c("covered.2.5%", "naive_cover", "imp_cover.2.5%"), c("profile", "naive", "union"))
