@@ -112,10 +112,10 @@ roiMLE <- function(y, cov, threshold,
   }
 
   # Setting-up Tykohonov regularization --------------
+  # If only one coordinate is selected then we don't need to regularize
   if(is.infinite(regularization_slack) | sum(selected) <= 1) {
     regularization_param <- rep(0, 2)
   } else if(is.null(regularization_param)) {
-    message("regularization parameters not specified, defaulting to 0,1")
     regularization_param <- c(1, 0)
   } else if(any(regularization_param < 0)) {
     stop("Regularization parameters must be positive")
@@ -160,9 +160,7 @@ roiMLE <- function(y, cov, threshold,
   # If a projected gradient method is used then initalization must be from
   # a parameter which satisfies the constraint.
   if(!is.null(projected)) {
-    #mu <- mu * sqrt(vars)
     mu[selected] <- rep(projected, sum(selected))
-    #mu <- mu / sqrt(vars)
   }
 
   estimates <- matrix(nrow = grad_iterations, ncol = p)
@@ -178,8 +176,9 @@ roiMLE <- function(y, cov, threshold,
 
   if(!is.null(projected)) {
     slackAdjusted <- FALSE
+    effective_slack <- regularization_slack
   } else {
-    regularization_slack <- regularization_slack * mean(mu[selected]) / obsmean
+    effective_slack <- regularization_slack * mean(mu[selected]) / obsmean
     slackAdjusted <- TRUE
   }
   regularization_param <- pmax(regularization_param, 10^-3)
@@ -219,7 +218,7 @@ roiMLE <- function(y, cov, threshold,
 
   compute <- compute[1]
   if(!is.null(projected) | compute != "mle") {
-    sub_invcov <- invcov[selected, selected]
+    sub_invcov <- invcov[selected, selected] * 0.5 + 0.5 * diag(sum(selected))
     mahal_vec <- as.numeric(sub_invcov %*% mean_weights)
     mahal_const <- sum(mahal_vec * mean_weights)
   }
@@ -239,11 +238,11 @@ roiMLE <- function(y, cov, threshold,
   if(compute == "lower-CI") { # Initializing from a conservative limit
     if(obs_mean > 0) {
       ci_lim_level = ci_alpha^2
-    } else
+    } else {
       ci_lim_level = ci_alpha
     }
     ci_lim <- obs_mean - qnorm(1 - ci_lim_level, sd = mean_sd)
-    regularization_slack <- abs(ci_lim) / abs(obs_mean)
+    effective_slack <- regularization_slack * abs(ci_lim) / abs(obs_mean)
     mu <- project_vector_mahalanobis(y, ci_lim, selected, mean_weights,
                                      mahal_const, mahal_vec)
     ci_lim_path <- numeric(grad_iterations - 1)
@@ -256,7 +255,7 @@ roiMLE <- function(y, cov, threshold,
       ci_lim_level = ci_alpha
     }
     ci_lim <- obs_mean + qnorm(1 - ci_alpha^2, sd = mean_sd)
-    regularization_slack <- abs(ci_lim) / abs(obs_mean)
+    effective_slack <- regularization_slack * abs(ci_lim) / abs(obs_mean)
     mu <- project_vector_mahalanobis(y, ci_lim, selected, mean_weights,
                                      mahal_const, mahal_vec)
     ci_lim_path <- numeric(grad_iterations - 1)
@@ -272,23 +271,24 @@ roiMLE <- function(y, cov, threshold,
   for(i in 2:grad_iterations) {
     # Projecting to new CI limit
     if(i > 2 & compute != "mle") {
-      step_lim <- 0.05
+      STEP_LIM <- 0.05
       if(compute == "lower-CI") {
         mult_const <- RB_const * (obs_mean - ci_lim)
         if(samp_mean < obs_mean) {
-          ci_lim <- ci_lim + min(mult_const * ci_alpha / sqrt(i - 2), step_lim * mean_sd)
+          ci_lim <- ci_lim + min(mult_const * ci_alpha / sqrt(i - 2), STEP_LIM * mean_sd)
         } else {
-          ci_lim <- ci_lim - min(mult_const * (1 - ci_alpha) / sqrt(i - 2), step_lim * mean_sd)
+          ci_lim <- ci_lim - min(mult_const * (1 - ci_alpha) / sqrt(i - 2), STEP_LIM * mean_sd)
         }
-        regularization_slack <- min(abs(ci_lim) / abs(obs_mean), abs(obs_mean - mean_sd * qnorm(1 - ci_alpha)) / abs(obs_mean))
+        effective_slack <- regularization_slack * min(abs(ci_lim) / abs(obs_mean), abs(obs_mean - mean_sd * qnorm(1 - ci_alpha)) / abs(obs_mean))
+        #print(effective_slack)
       } else if(compute == "upper-CI") {
         mult_const <- RB_const * (ci_lim - obs_mean)
         if(samp_mean > obs_mean) {
-          ci_lim <- ci_lim - min(mult_const * ci_alpha / (i - 2), step_lim * mean_sd)
+          ci_lim <- ci_lim - min(mult_const * ci_alpha / (i - 2), STEP_LIM * mean_sd)
         } else {
-          ci_lim <- ci_lim + min(mult_const * (1 - ci_alpha) / (i - 2), step_lim * mean_sd)
+          ci_lim <- ci_lim + min(mult_const * (1 - ci_alpha) / (i - 2), STEP_LIM * mean_sd)
         }
-        regularization_slack <- min(abs(ci_lim) / abs(obs_mean), abs(obs_mean + mean_sd * qnorm(1 - ci_alpha)) / abs(obs_mean))
+        effective_slack <- regularization_slack * min(abs(ci_lim) / abs(obs_mean), abs(obs_mean + mean_sd * qnorm(1 - ci_alpha)) / abs(obs_mean))
       }
       ci_lim_path[i - 1] <- ci_lim
       samp_means[i - 2] <- samp_mean
@@ -387,14 +387,14 @@ roiMLE <- function(y, cov, threshold,
        is.null(projected) &
        sum(selected) > 1 &
        compute == "mle") {
-      regularization_slack <- pmax(regularization_slack * mean(mu[selected]) / obsmean, 10^-3)
+      effective_slack <- pmax(regularization_slack * mean(mu[selected]) / obsmean, 10^-3)
       slackAdjusted <- TRUE
     }
 
     if(any(regularization_param > 0) & sum(selected) > 1) {
       regularization_param <- adjustTykohonov(obsDiff, obsmean, mu, selected,
                                         firstDiff, secondDiff,
-                                        regularization_slack, regularization_param)
+                                        effective_slack, regularization_param)
     }
     estimates[i, ] <- mu
     if(progress) setTxtProgressBar(pb, i)
@@ -497,6 +497,8 @@ roi_sampling_control <- function(samp_per_chain = 0,
 #' @param RB_mult adjusts the Robins-Monroe step sizes when computing
 #' profile-likelihood confidence intervals.
 #'
+#' @import magrittr
+#'
 #' @export
 roi_mle_control <- function(grad_iterations = 2100,
                         step_size_coef = 0.5,
@@ -507,7 +509,7 @@ roi_mle_control <- function(grad_iterations = 2100,
                         impute_boundary = c("smooth", "neighbors", "none", "mean"),
                         RB_mult = 1) {
   if(is.null(grad_delay)) {
-    grad_delay <- main(ceiling(grad_iterations / 6), 100)
+    grad_delay <- min(ceiling(grad_iterations / 6), 100)
   }
   if(is.null(assume_convergence)) {
     assume_convergence <- floor(grad_iterations / 3)
