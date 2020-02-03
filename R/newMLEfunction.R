@@ -218,7 +218,8 @@ roiMLE <- function(y, cov, threshold,
 
   compute <- compute[1]
   if(!is.null(projected) | compute != "mle") {
-    sub_invcov <- invcov[selected, selected] * 0.5 + 0.5 * diag(sum(selected))
+    sub_invcov <- invcov[selected, selected]
+    sub_invcov <- sub_invcov*0.5  + 0.5*diag(diag(sub_invcov))
     mahal_vec <- as.numeric(sub_invcov %*% mean_weights)
     mahal_const <- sum(mahal_vec * mean_weights)
   }
