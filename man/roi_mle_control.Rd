@@ -7,7 +7,7 @@
 roi_mle_control(grad_iterations = 2100, step_size_coef = 0.5,
   step_rate = 0.55, samp_per_iter = 20, grad_delay = NULL,
   assume_convergence = NULL, impute_boundary = c("smooth", "neighbors",
-  "none", "mean"), RB_mult = 1)
+  "none", "mean"), mahal_weight = 0.2, RB_mult = 1)
 }
 \arguments{
 \item{grad_iterations}{the number of stochastic gradient steps to take}

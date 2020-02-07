@@ -218,9 +218,10 @@ roiMLE <- function(y, cov, threshold,
 
   compute <- compute[1]
   if(!is.null(projected) | compute != "mle") {
-    sub_invcov <- invcov[selected, selected]
-    sub_invcov <- sub_invcov*0.5  + 0.5*diag(diag(sub_invcov))
-    mahal_vec <- as.numeric(sub_invcov %*% mean_weights)
+    mahal_mat <- cov[selected, selected]
+    mahal_mat <- mahal_mat * (mahal_weight) + diag(diag(mahal_mat)) * (1 - mahal_weight)
+    mahal_mat <- solve(mahal_mat)
+    mahal_vec <- as.numeric(mahal_mat %*% mean_weights)
     mahal_const <- sum(mahal_vec * mean_weights)
   }
   ##########################################
@@ -508,6 +509,7 @@ roi_mle_control <- function(grad_iterations = 2100,
                         grad_delay = NULL,
                         assume_convergence = NULL,
                         impute_boundary = c("smooth", "neighbors", "none", "mean"),
+                        mahal_weight = 0.2,
                         RB_mult = 1) {
   if(is.null(grad_delay)) {
     grad_delay <- min(ceiling(grad_iterations / 6), 100)
@@ -522,6 +524,7 @@ roi_mle_control <- function(grad_iterations = 2100,
                   grad_delay = grad_delay,
                   assume_convergence = assume_convergence,
                   impute_boundary = impute_boundary[1],
+                  mahal_weight = mahal_weight,
                   RB_mult = RB_mult)
   return(control)
 }
