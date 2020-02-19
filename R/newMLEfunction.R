@@ -41,13 +41,16 @@
 #'
 #' @param init initial value for the mean estimate
 #'
+#' @param boundary_mu an optional vector to plug in as mu values at the boundary.
+#' Used when impute_boundary = "plug_in".
+#'
 #' @param progress whether to display a bar describing the progress
 #' of the gradient algorithm.
 #'
 #' @param sampling_control a list with control parameters for sampling
 #' from the estimated distribution.
 #'
-#' @param mle_contorl a list of parameters to be used when computed the
+#' @param mle_control a list of parameters to be used when computed the
 #' conditional MLE.
 #'
 #' @import Matrix
@@ -63,9 +66,14 @@ roiMLE <- function(y, cov, threshold,
                    regularization_param = NULL,
                    regularization_slack = 1,
                    init = NULL,
+                   boundary_mu = NULL,
                    progress = FALSE,
                    sampling_control = roi_sampling_control(),
                    mle_control = roi_mle_control()) {
+
+  # Parameters hiding in the function
+  SMOOTH_SD <- 0.25
+
   list2env(mle_control, environment())
   grad_iterations <- max(grad_iterations, assume_convergence + length(y) + 1)
   # Basic checks and preliminaries ---------
@@ -74,8 +82,13 @@ roiMLE <- function(y, cov, threshold,
          length(y).")
   }
 
+
   if(length(threshold) == 1) {
     threshold <- rep(threshold, length(y))
+  }
+
+  if (length(projected)>1){
+    stop("projected (if given) must be a scalar - used for profile likelihood")
   }
 
   if(is.null(selected)){
@@ -109,7 +122,12 @@ roiMLE <- function(y, cov, threshold,
         smooth_weights <- apply(smooth_weights, 1, function(x) x / sum(x)) %>% t()
       }
     }
+  } else if (impute_boundary == "plug_in") {
+    if( ! (length(boundary_mu) == sum(!selected))){
+      stop('impute_boundary="plug_in" requires boundary_mu vector the length of the coordinates which were not selected')
+    }
   }
+
 
   # Setting-up Tykohonov regularization --------------
   # If only one coordinate is selected then we don't need to regularize
@@ -308,7 +326,8 @@ roiMLE <- function(y, cov, threshold,
     sliceSamplerRcpp(sampMat = sampMat, samp = sampInit,
                      chol = chol,
                      lth = lth - sampmu, uth = uth - sampmu)
-    sampMat <- t(t(sampMat) + sampmu)
+    sampMat <- sweep(sampMat, 2, sampmu, FUN = "+")
+
     sampMat[, !selected] <- -sampMat[, !selected]
     samp <- colMeans(sampMat)
     if(compute != "mle") {
@@ -376,6 +395,8 @@ roiMLE <- function(y, cov, threshold,
         }
         mu[!selected] <- smooth_weights %*% mu[selected] * neighbor_ratio
       }
+    } else if (impute_boundary == "plug_in") {
+      mu[!selected] <- boundary_mu
     }
 
     if(compute == "mle" & is.null(projected)) {
